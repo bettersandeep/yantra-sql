@@ -2,6 +2,9 @@
 
 use std::fmt;
 
+mod lexer;
+mod select;
+
 /// The version of this build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -37,8 +40,9 @@ impl Database {
 
     /// Runs one SQL statement and returns its result rows.
     /// Returns an error for each statement that it does not support.
+    /// The only supported statement is `SELECT` without `FROM`, with integer arithmetic.
     pub fn execute(&mut self, sql: &str) -> Result<Vec<Vec<Value>>, Error> {
-        Err(Error(format!("unsupported: {sql}")))
+        Ok(vec![select::select(sql)?])
     }
 }
 
@@ -52,8 +56,11 @@ mod tests {
     }
 
     #[test]
-    fn execute_supports_nothing() {
-        let error = Database::new().execute("SELECT 1").unwrap_err();
-        assert_eq!(error.to_string(), "unsupported: SELECT 1");
+    fn execute_returns_one_row() {
+        let mut db = Database::new();
+        let rows = db.execute("SELECT 1 + 2 AS a, 4 / 0").unwrap();
+        assert_eq!(rows, [[Value::Integer(3), Value::Null]]);
+        let error = db.execute("SELECT 1 FROM t").unwrap_err();
+        assert_eq!(error.to_string(), "unsupported syntax at Word(\"FROM\")");
     }
 }
