@@ -70,9 +70,17 @@ fn is_hash(line: &str) -> bool {
 /// Returns an error for input that it does not understand.
 fn parse(text: &str) -> Result<Vec<Record>, String> {
     let mut records = Vec::new();
-    let mut lines = text.lines().enumerate().map(|(i, l)| (i + 1, l)).peekable();
+    // Comment lines are removed before the records are read, as the format document says.
+    // A comment line is not a blank line, so it does not end a record.
+    // Known limit: an expected value that starts with `#` is removed too.
+    let mut lines = text
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l))
+        .filter(|(_, l)| !l.starts_with('#'))
+        .peekable();
     loop {
-        // Blank lines, comments and conditions come before the record header.
+        // Blank lines and conditions come before the record header.
         let mut conditioned = false;
         let mut skip = false;
         let (line, header) = loop {
@@ -88,7 +96,6 @@ fn parse(text: &str) -> Result<Vec<Record>, String> {
                     return Err(format!("line {line}: blank line after a condition"));
                 }
                 [] => {}
-                _ if text.starts_with('#') => {}
                 ["skipif", db, ..] => {
                     skip |= db == IDENTITY;
                     conditioned = true;
@@ -128,10 +135,9 @@ fn parse(text: &str) -> Result<Vec<Record>, String> {
                     Some("valuesort") => Sort::Value,
                     Some(other) => return Err(format!("line {line}: unknown sort mode {other}")),
                 };
-                let Some(split) = body.iter().position(|l| *l == "----") else {
-                    return Err(format!("line {line}: query without a ---- line"));
-                };
-                let values = &body[split + 1..];
+                // Without a `----` line the whole body is SQL and the expected result is empty.
+                let split = body.iter().position(|l| *l == "----").unwrap_or(body.len());
+                let values = body.get(split + 1..).unwrap_or_default();
                 let expected = if let [one] = values
                     && is_hash(one)
                 {
@@ -186,7 +192,19 @@ fn render(value: &Value, ty: Type) -> Option<String> {
         (Type::Real, Value::Integer(i)) => Some(format!("{:.3}", *i as f64)),
         (Type::Real, Value::Real(r)) => Some(format!("{r:.3}")),
         (Type::Text, Value::Text(s)) if s.is_empty() => Some("(empty)".to_string()),
-        (Type::Text, Value::Text(s)) => Some(s.clone()),
+        // A byte outside printable ASCII becomes `@`, as in the C program with `isprint`.
+        // The C program works on bytes, so a non-ASCII char gives one `@` for each UTF-8 byte.
+        (Type::Text, Value::Text(s)) => Some(
+            s.bytes()
+                .map(|b| {
+                    if (0x20..=0x7e).contains(&b) {
+                        b as char
+                    } else {
+                        '@'
+                    }
+                })
+                .collect(),
+        ),
         (Type::Integer | Type::Real, Value::Text(_)) | (Type::Text, Value::Real(_)) => None,
     }
 }
@@ -434,7 +452,6 @@ fn parse_fails_closed() {
         "query X\nSELECT 1\n----\n1\n",
         "query I colsort\nSELECT 1\n----\n1\n",
         "query I rowsort label-1 more\nSELECT 1\n----\n1\n",
-        "query I\nSELECT 1\n",
         "query I\n----\n1\n",
         "query II\nSELECT 1, 2\n----\n1\n2\n3\n",
         "hash-threshold\n",
@@ -554,4 +571,63 @@ fn baseline_must_match_exactly() {
     assert_eq!(problems("a.test 3\na.test 3\ndir/b c.test 0\n"), 1);
     let message = &check_baseline(&measured, "a.test 2\ndir/b c.test 0\n")[0];
     assert!(message.contains("3 records pass") && message.contains("exactly 3"));
+}
+
+#[test]
+fn query_without_results_expects_an_empty_set() {
+    let empty = |sql: &str| Record {
+        line: 1,
+        sql: sql.to_string(),
+        kind: query(vec![Type::Integer], Sort::None, &[]),
+    };
+    // No `----` line: the whole body is SQL.
+    assert_eq!(
+        parse("query I\nSELECT 1\n  WHERE 0\n"),
+        Ok(vec![empty("SELECT 1\n  WHERE 0")])
+    );
+    // A `----` line with no values after it.
+    assert_eq!(
+        parse("query I\nSELECT 1\n----\n"),
+        Ok(vec![empty("SELECT 1")])
+    );
+    let mut no_rows = |_: &str| Ok(vec![]);
+    let mut one_row = |_: &str| Ok(vec![vec![Value::Integer(1)]]);
+    assert_eq!(run(&empty("SELECT 1"), &mut no_rows), Ok(()));
+    assert!(run(&empty("SELECT 1"), &mut one_row).is_err());
+}
+
+#[test]
+fn comment_lines_are_removed_before_parsing() {
+    // Comments before the header, in the SQL and in the results.
+    let text =
+        "# c\nskipif mysql\n# c\nquery I\n# c\nSELECT 1\n# c\n  + 1\n# c\n----\n# c\n2\n# c\n";
+    let want = Record {
+        line: 4,
+        sql: "SELECT 1\n  + 1".to_string(),
+        kind: query(vec![Type::Integer], Sort::None, &["2"]),
+    };
+    assert_eq!(parse(text), Ok(vec![want]));
+    // A comment line is not a blank line: it does not end a record.
+    let text = "statement ok\nSELECT 1\n# c\nSELECT 2\n\n# c\n# c\n\nstatement ok\nSELECT 3\n";
+    let statement = |line, sql: &str| Record {
+        line,
+        sql: sql.to_string(),
+        kind: Kind::Statement { ok: true },
+    };
+    assert_eq!(
+        parse(text),
+        Ok(vec![
+            statement(1, "SELECT 1\nSELECT 2"),
+            statement(9, "SELECT 3")
+        ])
+    );
+}
+
+#[test]
+fn unprintable_text_renders_as_at() {
+    let render_text = |s: &str| render(&Value::Text(s.to_string()), Type::Text);
+    assert_eq!(render_text(" a b~"), Some(" a b~".to_string()));
+    assert_eq!(render_text("a\tb\r\n\u{7f}"), Some("a@b@@@".to_string()));
+    // One `@` for each UTF-8 byte: U+00E9 has two bytes.
+    assert_eq!(render_text("caf\u{e9}"), Some("caf@@".to_string()));
 }
