@@ -46,6 +46,14 @@ The author offers GPL, BSD, MIT or CC0, and this repo uses the file under MIT.
 
 ## Status
 
-The engine returns an error for each statement.
-The test harness is in place.
-Score: 0 of 10012 records pass in `random/expr/slt_good_0.test`.
+The engine runs `SELECT [ALL | DISTINCT] <item> {, <item>}` without `FROM`.
+An item is an expression with an optional alias.
+An expression can use integer literals, unary `+` and `-`, binary `+ - * / %` and parentheses.
+The arithmetic follows SQLite.
+Division truncates toward zero.
+The result of `%` has the sign of the left operand.
+Division or modulo by zero gives NULL.
+The engine returns an error for each other statement or expression, and for integer overflow.
+A SQLite keyword is not accepted as an alias.
+An expression that is nested more than 100 levels deep is an error.
+Score: 4577 of 10012 records pass in `random/expr/slt_good_0.test`.
