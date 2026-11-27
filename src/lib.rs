@@ -1,4 +1,4 @@
-//! yantra-sql: a SQL database that gives the same answers as SQLite.
+//! lekha: a SQL database that gives the same answers as SQLite.
 
 use std::fmt;
 

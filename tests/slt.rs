@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Once;
 use std::{env, fs};
 
-use yantra_sql::{Database, Value};
+use lekha::{Database, Value};
 
 /// The database name that `skipif` and `onlyif` lines are compared with.
 const IDENTITY: &str = "sqlite";
