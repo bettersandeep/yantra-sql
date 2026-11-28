@@ -1,0 +1,18 @@
+Results from Checkly's API (GET /v1/check-results/<check id>), read on 2026-11-28 at 10:53 UTC.
+Each line: start time (UTC), failed or passed, location, HTTP status, response time, response body.
+
+Real check: "lekha on the Raspberry Pi answers a known query", each 10 minutes: 1 results
+  2026-11-28T10:51:18.579Z  passed  ap-south-1  status 200  59 ms  {"ok":true,"rows":[["3","-3","1"]]}
+
+Temporary check with a wrong expected value (4 where the engine gives 3), each 1 minute. Removed at 10:53 UTC.: 11 results
+  2026-11-28T10:53:38.485Z  FAILED  ap-south-1  status 200  59 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:52:40.911Z  FAILED  ap-south-1  status 200  77 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:51:39.919Z  FAILED  ap-south-1  status 200  155 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:50:41.473Z  FAILED  ap-south-1  status 200  53 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:49:40.569Z  FAILED  ap-south-1  status 200  67 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:48:38.939Z  FAILED  ap-south-1  status 200  49 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:47:40.650Z  FAILED  ap-south-1  status 200  193 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:46:39.281Z  FAILED  ap-south-1  status 200  171 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:45:40.596Z  FAILED  ap-south-1  status 200  58 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:44:39.325Z  FAILED  ap-south-1  status 200  69 ms  {"ok":true,"rows":[["3","-3","1"]]}
+  2026-11-28T10:43:41.951Z  FAILED  ap-south-1  status 200  62 ms  {"ok":true,"rows":[["3","-3","1"]]}

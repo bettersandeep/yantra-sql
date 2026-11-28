@@ -1,0 +1,60 @@
+{
+  "name": "lekha on the Raspberry Pi answers a known query",
+  "description": "Sends one SQL query to the public address of the engine and compares the whole answer. A status 200 alone does not pass.",
+  "activated": true,
+  "frequency": 10,
+  "locations": [
+    "ap-south-1"
+  ],
+  "tags": [
+    "lekha",
+    "pi"
+  ],
+  "degradedResponseTime": 5000,
+  "maxResponseTime": 20000,
+  "useGlobalAlertSettings": true,
+  "request": {
+    "method": "POST",
+    "url": "https://lekha.bettersandeep.com/query",
+    "bodyType": "RAW",
+    "body": "SELECT 7 / 2, -7 / 2, 7 % -2",
+    "headers": [
+      {
+        "key": "Content-Type",
+        "value": "text/plain"
+      }
+    ],
+    "assertions": [
+      {
+        "source": "STATUS_CODE",
+        "comparison": "EQUALS",
+        "target": "200"
+      },
+      {
+        "source": "JSON_BODY",
+        "property": "$.ok",
+        "comparison": "EQUALS",
+        "target": "true"
+      },
+      {
+        "source": "JSON_BODY",
+        "property": "$.rows[0][0]",
+        "comparison": "EQUALS",
+        "target": "3"
+      },
+      {
+        "source": "JSON_BODY",
+        "property": "$.rows[0][1]",
+        "comparison": "EQUALS",
+        "target": "-3"
+      },
+      {
+        "source": "JSON_BODY",
+        "property": "$.rows[0][2]",
+        "comparison": "EQUALS",
+        "target": "1"
+      }
+    ]
+  },
+  "alertChannelSubscriptions": "one email channel of the account (id left out)"
+}
