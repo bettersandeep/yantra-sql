@@ -12,6 +12,14 @@ pub enum Token<'a> {
     Star,
     Slash,
     Percent,
+    /// `=` or `==`.
+    Equal,
+    /// `<>` or `!=`.
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     LeftParen,
     RightParen,
     Comma,
@@ -37,6 +45,46 @@ pub fn lex(sql: &str) -> Result<Vec<Token<'_>>, Error> {
             b'*' => Token::Star,
             b'/' => Token::Slash,
             b'%' => Token::Percent,
+            // The spellings of the comparison operators are from section 2 of
+            // https://www.sqlite.org/lang_expr.html.
+            // The two characters of an operator have no white space between them:
+            // SQLite 3.46.1 gives a syntax error for `1 < > 2`, `1 < = 2` and `1 = = 1`.
+            b'=' => {
+                if bytes.get(i) == Some(&b'=') {
+                    i += 1;
+                }
+                Token::Equal
+            }
+            b'!' if bytes.get(i) == Some(&b'=') => {
+                i += 1;
+                Token::NotEqual
+            }
+            b'<' => match bytes.get(i) {
+                Some(b'=') => {
+                    i += 1;
+                    Token::LessEqual
+                }
+                Some(b'>') => {
+                    i += 1;
+                    Token::NotEqual
+                }
+                // `<<` is a bit operator. It is not two comparisons.
+                Some(b'<') => {
+                    return Err(Error("the operator << is not supported".to_string()));
+                }
+                _ => Token::Less,
+            },
+            b'>' => match bytes.get(i) {
+                Some(b'=') => {
+                    i += 1;
+                    Token::GreaterEqual
+                }
+                // `>>` is a bit operator. It is not two comparisons.
+                Some(b'>') => {
+                    return Err(Error("the operator >> is not supported".to_string()));
+                }
+                _ => Token::Greater,
+            },
             b'(' => Token::LeftParen,
             b')' => Token::RightParen,
             b',' => Token::Comma,
@@ -98,6 +146,53 @@ mod tests {
     }
 
     #[test]
+    fn splits_comparison_operators() {
+        assert_eq!(
+            lex("= == <> != < <= > >= <1>2=3").unwrap(),
+            [
+                Token::Equal,
+                Token::Equal,
+                Token::NotEqual,
+                Token::NotEqual,
+                Token::Less,
+                Token::LessEqual,
+                Token::Greater,
+                Token::GreaterEqual,
+                Token::Less,
+                Token::Integer(1),
+                Token::Greater,
+                Token::Integer(2),
+                Token::Equal,
+                Token::Integer(3),
+            ]
+        );
+        // White space ends an operator, and the longest operator wins.
+        assert_eq!(
+            lex("< > < = = = === =< => >< >=- <=>").unwrap(),
+            [
+                Token::Less,
+                Token::Greater,
+                Token::Less,
+                Token::Equal,
+                Token::Equal,
+                Token::Equal,
+                Token::Equal,
+                Token::Equal,
+                Token::Equal,
+                Token::Less,
+                Token::Equal,
+                Token::Greater,
+                Token::Greater,
+                Token::Less,
+                Token::GreaterEqual,
+                Token::Minus,
+                Token::LessEqual,
+                Token::Greater,
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_text() {
         for sql in [
             "9223372036854775808",
@@ -111,9 +206,15 @@ mod tests {
             "\"name\"",
             "1 -- comment",
             "1 --2",
-            "1 = 1",
-            "1 < 2",
+            "1 ! = 2",
+            "1 ! 2",
+            "!1",
+            "1 << 2",
+            "8 >> 1",
+            "1 <<= 2",
             "1 || 2",
+            "1 | 2",
+            "1 & 3",
             "~1",
             "1;",
             "a.b",

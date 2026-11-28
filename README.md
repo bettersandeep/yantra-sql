@@ -54,7 +54,15 @@ The author offers GPL, BSD, MIT or CC0, and this repo uses the file under MIT.
 
 The engine runs `SELECT [ALL | DISTINCT] <item> {, <item>}` without `FROM`.
 An item is an expression with an optional alias.
-An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM` and `CAST(<expr> AS INTEGER)`.
+An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, the comparisons `= == <> != < <= > >=`, `IS NULL`, `IS NOT NULL`, `NOT`, `AND`, `OR`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM` and `CAST(<expr> AS INTEGER)`.
+The precedence of the operators is the table in section 2 of https://www.sqlite.org/lang_expr.html, and operators of one row group from left to right.
+A comparison gives 1 or 0, and NULL when an operand is NULL.
+`IS NULL` and `IS NOT NULL` give 1 or 0.
+`NOT`, `AND` and `OR` follow the three-valued logic of SQLite: a value is true when it is not 0 and not NULL, `NULL AND 0` is 0, `NULL OR 1` is 1, and `NOT NULL` is NULL.
+A `NOT` can be the operand of another operator, and it then takes the rest of the expression up to the next `AND` or `OR`: `- NOT 0 = 5` is `- (NOT (0 = 5))`, as in SQLite.
+The engine computes both operands of `AND` and `OR`, so an error in the right operand is an error for the statement.
+Each other operator is an error: `~`, `||`, the bit operators, `BETWEEN`, `IN`, `LIKE`, `GLOB`, `ISNULL`, `NOTNULL`, `NOT NULL` as a postfix, `IS DISTINCT FROM`, and `IS` or `IS NOT` with a right side that is not the literal `NULL`.
+`1 IS NULL + 1` is also an error, because SQLite reads it as `1 IS (NULL + 1)`.
 The arithmetic follows SQLite.
 Division truncates toward zero.
 The result of `%` has the sign of the left operand.
