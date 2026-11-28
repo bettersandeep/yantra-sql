@@ -867,3 +867,19 @@ class FlowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BranchNameTest(unittest.TestCase):
+    def test_title_and_number(self):
+        self.assertEqual(runner.branch_name(24, "CASE expressions in SELECT without FROM"), "case-expressions-in-select-24")
+        self.assertEqual(runner.branch_name(18, "CAST to INTEGER in SELECT without FROM"), "cast-to-integer-in-18")
+
+    def test_only_safe_characters(self):
+        for title in ['"; rm -rf / $(id) `x`', "--upload-pack=evil", "a/../../b", "caf\u00e9 \u2603 ok", "A" * 300]:
+            name = runner.branch_name(7, title)
+            self.assertRegex(name, r"^[a-z0-9]+(-[a-z0-9]+)*-7$")
+            self.assertLessEqual(len(name), 43)
+
+    def test_empty_title(self):
+        self.assertEqual(runner.branch_name(3, ""), "ticket-3")
+        self.assertEqual(runner.branch_name(3, "!!!"), "ticket-3")

@@ -51,7 +51,8 @@ It changes nothing.
 2. It reads the issue.
    It puts the label `agent-working` on the issue, and then takes `agent-go` off.
    Then it validates the ticket.
-3. It makes a new clone in the run directory and the branch `ticket-<N>` from `origin/main`.
+3. It makes a new clone in the run directory and a branch from `origin/main`.
+   The branch name is the first four words of the ticket title and the ticket number, for example `case-expressions-in-select-24`.
    If the remote branch is there already, it stops.
    It copies `ci/guard.sh` of `origin/main` into the run directory, and writes the command `yt` there.
 4. It records the old score from `tests/slt/baseline.txt`.
@@ -185,7 +186,7 @@ This also stops a run that is in progress.
 The runner then kills its agent and removes the lock.
 The issue keeps the label `agent-working`.
 Remove it by hand, and put `agent-go` again to start a new run.
-A new run needs the remote branch `ticket-<N>` to be gone.
+A new run needs the remote branch of the ticket to be gone.
 
 launchd runs `runner.py` from this checkout, with the branch that is checked out here.
 The agent gets `yantra/brief.md` from the new clone, which is `origin/main`.
@@ -207,12 +208,12 @@ The path can have only letters, digits and `_ @ % + = : . / -`.
 With white space, a quote or a different special character in the real path, the runner does not start: it exits with code 2 and writes nothing to GitHub.
 
 - `tick.log`: the output of each tick from launchd.
-- `runs/ticket-<N>-<UTC time>/run.log`: each command of one run, with its exit code and output, and UTC times.
-- `runs/ticket-<N>-<UTC time>/agent-prompt-<k>.md` and `agent-report-<k>.md`: the prompt and the report of agent start `<k>`.
-- `runs/ticket-<N>-<UTC time>/input/`: the files that the agent can read, which are the output of a failed check and a Qodo review.
-- `runs/ticket-<N>-<UTC time>/bin/yt` and `guard.sh`: the command of the agent, and the guard of `origin/main`.
-- `runs/ticket-<N>-<UTC time>/HANDOFF_FAILED`: only when a last write to GitHub failed.
-- `runs/ticket-<N>-<UTC time>/repo`: the clone.
+- `runs/<branch>-<UTC time>/run.log`: each command of one run, with its exit code and output, and UTC times.
+- `runs/<branch>-<UTC time>/agent-prompt-<k>.md` and `agent-report-<k>.md`: the prompt and the report of agent start `<k>`.
+- `runs/<branch>-<UTC time>/input/`: the files that the agent can read, which are the output of a failed check and a Qodo review.
+- `runs/<branch>-<UTC time>/bin/yt` and `guard.sh`: the command of the agent, and the guard of `origin/main`.
+- `runs/<branch>-<UTC time>/HANDOFF_FAILED`: only when a last write to GitHub failed.
+- `runs/<branch>-<UTC time>/repo`: the clone.
 
 The runner does not delete run directories.
 

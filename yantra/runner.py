@@ -612,13 +612,23 @@ def git_fence(clone):
     return digest.hexdigest()
 
 
+def branch_name(number, title):
+    """The branch of a ticket: the first words of its title and its number.
+
+    The title is text from GitHub, so only a-z, 0-9 and "-" get into the name.
+    """
+    words = re.sub(r"[^a-z0-9]+", " ", str(title).lower()).split()
+    slug = "-".join(words[:4])[:40].strip("-")
+    return "%s-%d" % (slug or "ticket", number)
+
+
 class Run:
     def __init__(self, issue):
         self.issue = issue
         self.number = issue["number"]
-        self.branch = "ticket-%d" % self.number
+        self.branch = branch_name(self.number, issue.get("title", ""))
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.dir = os.path.join(STATE, "runs", "ticket-%d-%s" % (self.number, stamp))
+        self.dir = os.path.join(STATE, "runs", "%s-%s" % (self.branch, stamp))
         self.clone = os.path.join(self.dir, "repo")
         self.input = os.path.join(self.dir, "input")  # files that the agent can read
         self.guard = os.path.join(self.dir, "guard.sh")  # ci/guard.sh of origin/main
