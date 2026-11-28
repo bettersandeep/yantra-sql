@@ -64,10 +64,32 @@ fn apply(op: Token, left: Option<i64>, right: Option<i64>) -> Result<Option<i64>
     result.map(Some).ok_or_else(overflow)
 }
 
+/// Applies a comparison operator to two integers. The result is 1, 0 or NULL.
+/// "The result of any binary operator is either a numeric value or NULL" and a comparison
+/// with a NULL operand gives NULL: https://www.sqlite.org/datatype3.html section 4.
+/// SQLite 3.46.1 gives `1, 0, 1, 0, 1, 1, 0, 0` for
+/// `SELECT 1 = 1, 1 == 2, 1 <> 2, 1 != 1, 1 < 2, 2 <= 2, 1 > 2, 2 >= 3`,
+/// and NULL for each of them when one operand is NULL.
+fn compare(op: Token, left: Option<i64>, right: Option<i64>) -> Result<Option<i64>, Error> {
+    let (Some(a), Some(b)) = (left, right) else {
+        return Ok(None);
+    };
+    let result = match op {
+        Token::Equal => a == b,
+        Token::NotEqual => a != b,
+        Token::Less => a < b,
+        Token::LessEqual => a <= b,
+        Token::Greater => a > b,
+        Token::GreaterEqual => a >= b,
+        _ => return Err(Error(format!("{op:?} is not a comparison operator"))),
+    };
+    Ok(Some(i64::from(result)))
+}
+
 struct Parser<'a> {
     tokens: Vec<Token<'a>>,
     pos: usize,
-    /// The number of `unary` calls that are in progress.
+    /// The number of `unary` calls that are in progress. A `NOT` is one of them.
     depth: usize,
     /// True while the parser reads the argument of an aggregate function.
     in_aggregate: bool,
@@ -95,8 +117,114 @@ impl<'a> Parser<'a> {
         found
     }
 
-    /// `term {(+ | -) term}`
+    /// `and {OR and}`
+    ///
+    /// The precedence of the operators is the table in section 2 of
+    /// https://www.sqlite.org/lang_expr.html. From the lowest to the highest:
+    /// `OR`, `AND`, `NOT`, the row of `=` and `IS`, the row of `<`, `+ -`, `* / %`, unary.
+    /// Operators of one row group from left to right.
+    ///
+    /// The three-valued logic is from https://www.sqlite.org/nulls.html and from SQLite 3.46.1:
+    /// `SELECT NULL OR 1, 1 OR NULL, NULL OR 0, 0 OR NULL, NULL OR NULL` gives
+    /// `1, 1, NULL, NULL, NULL`.
+    /// A value is true when it is not 0 and not NULL: `SELECT 0 OR - 3` gives 1.
+    /// The right operand is computed in each case, so an error in it is an error for the statement.
     fn expr(&mut self) -> Result<Option<i64>, Error> {
+        let mut left = self.and()?;
+        while self.keyword("OR") {
+            let right = self.and()?;
+            left = match (left, right) {
+                (Some(a), _) if a != 0 => Some(1),
+                (_, Some(b)) if b != 0 => Some(1),
+                (Some(_), Some(_)) => Some(0),
+                _ => None,
+            };
+        }
+        Ok(left)
+    }
+
+    /// `equality {AND equality}`
+    ///
+    /// SQLite 3.46.1: `SELECT NULL AND 0, 0 AND NULL, NULL AND 1, 1 AND NULL, NULL AND NULL` gives
+    /// `0, 0, NULL, NULL, NULL`, and `SELECT 2 AND - 3` gives 1.
+    /// There is no level for `NOT` between this one and `equality`.
+    /// A `NOT` is read in `unary`, and the comment there says why.
+    fn and(&mut self) -> Result<Option<i64>, Error> {
+        let mut left = self.equality()?;
+        while self.keyword("AND") {
+            let right = self.equality()?;
+            left = match (left, right) {
+                (Some(0), _) | (_, Some(0)) => Some(0),
+                (Some(_), Some(_)) => Some(1),
+                _ => None,
+            };
+        }
+        Ok(left)
+    }
+
+    /// `comparison {(= | == | <> | !=) comparison | IS [NOT] NULL}`
+    ///
+    /// `IS` and `IS NOT` are in the row of `=`, so they group from left to right with it.
+    /// SQLite 3.46.1: `SELECT 1 = 2 IS NULL, NULL IS NULL = 1, NULL IS NULL IS NULL` gives `0, 1, 0`.
+    /// `IS NULL` and `IS NOT NULL` give 1 or 0, and never NULL.
+    ///
+    /// The right side of `IS` is an expression in SQLite, and only the literal `NULL` is supported.
+    /// An operator of a higher row after that `NULL` belongs to the right side:
+    /// SQLite 3.46.1 reads `1 IS NULL + 1` as `1 IS (NULL + 1)` and gives 0.
+    /// That is an error here. So are `IS DISTINCT FROM` and each other right side.
+    fn equality(&mut self) -> Result<Option<i64>, Error> {
+        let mut left = self.comparison()?;
+        loop {
+            if let Some(op @ (Token::Equal | Token::NotEqual)) = self.peek() {
+                self.pos += 1;
+                left = compare(op, left, self.comparison()?)?;
+            } else if self.keyword("IS") {
+                let not = self.keyword("NOT");
+                if !self.keyword("NULL") {
+                    return Err(Error(
+                        "IS with a right side that is not NULL is not supported".to_string(),
+                    ));
+                }
+                if let Some(
+                    Token::Plus
+                    | Token::Minus
+                    | Token::Star
+                    | Token::Slash
+                    | Token::Percent
+                    | Token::Less
+                    | Token::LessEqual
+                    | Token::Greater
+                    | Token::GreaterEqual,
+                ) = self.peek()
+                {
+                    return Err(Error(
+                        "IS with a right side that is not NULL is not supported".to_string(),
+                    ));
+                }
+                left = Some(i64::from(left.is_none() != not));
+            } else {
+                return Ok(left);
+            }
+        }
+    }
+
+    /// `sum {(< | <= | > | >=) sum}`
+    ///
+    /// SQLite 3.46.1: `SELECT 1 < 2 < 3, 3 > 2 > 1, 1 = 2 < 3, 0 = 1 < 2` gives `1, 0, 1, 0`.
+    fn comparison(&mut self) -> Result<Option<i64>, Error> {
+        let mut left = self.sum()?;
+        while let Some(
+            op @ (Token::Less | Token::LessEqual | Token::Greater | Token::GreaterEqual),
+        ) = self.peek()
+        {
+            self.pos += 1;
+            left = compare(op, left, self.sum()?)?;
+        }
+        Ok(left)
+    }
+
+    /// `term {(+ | -) term}`
+    fn sum(&mut self) -> Result<Option<i64>, Error> {
         let mut left = self.term()?;
         while let Some(op @ (Token::Plus | Token::Minus)) = self.peek() {
             self.pos += 1;
@@ -209,7 +337,7 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    /// `+ unary`, `- unary`, an integer literal, `NULL`, `( expr )`, a `CAST` or a function call.
+    /// `+ unary`, `- unary`, `NOT equality`, an integer literal, `NULL`, `( expr )`, a `CAST` or a function call.
     /// Each recursion of the parser goes through this function.
     fn unary(&mut self) -> Result<Option<i64>, Error> {
         if self.depth == MAX_DEPTH {
@@ -231,6 +359,19 @@ impl<'a> Parser<'a> {
             Some(Token::Integer(v)) => {
                 self.pos += 1;
                 Some(v)
+            }
+            // `NOT` takes each operator of a higher row into its operand, and stops before
+            // `AND` and `OR`. That is its row in the precedence table.
+            // It is read here because SQLite accepts a `NOT` as the operand of each operator,
+            // and the `NOT` then takes the rest of the expression in the same way.
+            // SQLite 3.46.1: `SELECT - NOT 0 = 5, 1 + NOT 0 = 5, 1 = NOT 0 = 1, 3 - NOT 1 - 1`
+            // gives `-1, 2, 1, 2`, so `- NOT 0 = 5` is `- (NOT (0 = 5))`.
+            // After the operand, the next token is not an operator of a higher row,
+            // so the callers of `unary` do not continue with one.
+            // `NOT NULL` is NULL, `NOT 0` is 1, and `NOT` of each other value is 0.
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("NOT") => {
+                self.pos += 1;
+                self.equality()?.map(|v| i64::from(v == 0))
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 self.pos += 1;
@@ -846,6 +987,305 @@ mod tests {
         );
     }
 
+    /// Turns `None` into NULL and a number into an integer.
+    fn vals(values: &[Option<i64>]) -> Vec<Value> {
+        values
+            .iter()
+            .map(|v| v.map_or(Value::Null, Value::Integer))
+            .collect()
+    }
+
+    // The expected values of the tests from here to `other_operators_are_errors` are the
+    // answers of SQLite 3.46.1 for the same statements.
+    #[test]
+    fn comparison_gives_one_zero_or_null() {
+        assert_eq!(
+            run("SELECT 1 = 1, 1 == 2, 1 <> 2, 1 != 1, 1 < 2, 2 <= 2, 1 > 2, 2 >= 3"),
+            ints(&[1, 0, 1, 0, 1, 1, 0, 0])
+        );
+        assert_eq!(
+            run("SELECT 1=2, 2==2, 2<>2, 1!=2, 2<1, 3<=2, 2>1, 3>=3, 1<-2, 1=+1, -1<0, -1=-1"),
+            ints(&[0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1])
+        );
+        assert_eq!(
+            run(
+                "SELECT NULL = 1, 1 == NULL, NULL <> NULL, 1 != NULL, NULL < 1, 1 <= NULL, \
+                 NULL > 1, NULL >= NULL, 1 / 0 = 1 / 0"
+            ),
+            [const { Value::Null }; 9]
+        );
+        assert_eq!(
+            run("SELECT -9223372036854775807 - 1 < 9223372036854775807, \
+                 9223372036854775807 > -9223372036854775807 - 1"),
+            ints(&[1, 1])
+        );
+    }
+
+    #[test]
+    fn not_and_or_follow_three_valued_logic() {
+        assert_eq!(
+            run("SELECT NOT 0, NOT 1, NOT 5, NOT - 3, NOT NULL, NOT NOT 7, not not null"),
+            vals(&[Some(1), Some(0), Some(0), Some(0), None, Some(1), None])
+        );
+        assert_eq!(
+            run(
+                "SELECT 0 AND 0, 0 AND 1, 1 AND 0, 1 AND 1, 2 AND - 3, NULL AND 0, 0 AND NULL, \
+                 NULL AND 1, 1 AND NULL, NULL AND NULL"
+            ),
+            vals(&[
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(0),
+                Some(0),
+                None,
+                None,
+                None,
+            ])
+        );
+        assert_eq!(
+            run(
+                "SELECT 0 OR 0, 0 OR 1, 1 OR 0, 1 OR 1, 0 OR - 3, NULL OR 0, 0 OR NULL, \
+                 NULL OR 1, 1 OR NULL, NULL OR NULL"
+            ),
+            vals(&[
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                None,
+                None,
+                Some(1),
+                Some(1),
+                None,
+            ])
+        );
+        assert_eq!(
+            run("SELECT 1 and NOT 0, 1 Or nOt 1, NOT 0 OR NOT 0, NOT 1 AND NOT 1, 0 OR NOT NULL"),
+            vals(&[Some(1), Some(1), Some(1), Some(0), None])
+        );
+    }
+
+    #[test]
+    fn is_null_and_is_not_null_give_one_or_zero() {
+        assert_eq!(
+            run(
+                "SELECT 1 IS NULL, NULL IS NULL, 1 IS NOT NULL, NULL IS NOT NULL, 1 / 0 IS NULL, \
+                 0 IS NULL, 0 is not null, (NULL = 1) IS NULL, NULL + 1 IS NOT NULL"
+            ),
+            ints(&[0, 1, 1, 0, 1, 0, 1, 1, 0])
+        );
+    }
+
+    #[test]
+    fn precedence_of_comparison_and_boolean_operators() {
+        // Arithmetic, then `<`, then `=`.
+        assert_eq!(
+            run(
+                "SELECT 1 + 2 < 4, 1 < 2 + 3, 2 * 3 = 6, 1 < 2 = 1, 1 = 2 < 3, 0 = 1 < 2, 2 = 1 + 1"
+            ),
+            ints(&[1, 1, 1, 1, 1, 0, 1])
+        );
+        // Operators of one row group from left to right.
+        assert_eq!(
+            run(
+                "SELECT 1 < 2 < 3, 3 > 2 > 1, 1 = 1 = 1, 2 = 2 = 2, 1 <> 2 <> 1, 3 < 2 < 1, \
+                 5 >= 5 <= 0"
+            ),
+            ints(&[1, 0, 1, 0, 0, 1, 0])
+        );
+        // `IS` is in the row of `=`.
+        assert_eq!(
+            run(
+                "SELECT NULL IS NULL = 1, 1 = 2 IS NULL, NULL = 1 IS NULL, NULL IS NULL IS NULL, \
+                 1 IS NOT NULL IS NULL, 2 = 2 IS NOT NULL, 1 IS NOT NULL = 1, 1 IS NULL = 0, \
+                 1 = 1 IS NULL, NULL IS NULL <> 1"
+            ),
+            ints(&[1, 0, 1, 0, 0, 1, 1, 1, 0, 0])
+        );
+        // `NOT` is below the row of `=` and above `AND`.
+        assert_eq!(
+            run(
+                "SELECT NOT 1 = 2, NOT 0 = 0, NOT 1 + 1, NOT 0 < 1, NOT 1 IS NULL, \
+                 NOT NULL IS NULL, NOT 1 IS NOT NULL"
+            ),
+            ints(&[1, 0, 0, 0, 1, 0, 0])
+        );
+        // `AND` is above `OR`.
+        assert_eq!(
+            run(
+                "SELECT 1 OR 0 AND 0, (1 OR 0) AND 0, 0 AND 0 OR 1, 0 AND (0 OR 1), NOT 0 AND 0, \
+                 NOT (0 AND 0), NOT 1 OR 1, NOT (1 OR 1), 1 IS NULL AND 1, NULL IS NULL OR 0"
+            ),
+            ints(&[1, 0, 1, 0, 0, 1, 1, 0, 0, 1])
+        );
+    }
+
+    #[test]
+    fn not_as_an_operand_takes_the_rest_of_the_expression() {
+        assert_eq!(
+            run(
+                "SELECT - NOT 0 = 5, 1 + NOT 0 = 5, 1 + NOT 0 AND 0, 1 = NOT 0 = 1, \
+                 2 * NOT 0 + 3, - NOT 0, 5 - NOT 1 < 1"
+            ),
+            ints(&[-1, 2, 0, 1, 0, -1, 4])
+        );
+        assert_eq!(
+            run("SELECT 1 < NOT 0, 1 < NOT 0 + 1, 2 > NOT 0 > 0, 3 - NOT 1 - 1, 3 * NOT 1 = 0"),
+            ints(&[0, 0, 1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn comparison_result_is_an_integer_operand() {
+        assert_eq!(
+            run(
+                "SELECT (1 < 2) + (2 < 3), (1 = 1) * 5, - (1 = 1), COALESCE(NULL = 1, 7), \
+                 NULLIF(1 = 1, 1), COUNT(NULL = 1), SUM(2 > 1), MAX(1 AND NULL), MIN(NOT 0), \
+                 CAST(1 < 2 AS INTEGER)"
+            ),
+            vals(&[
+                Some(2),
+                Some(5),
+                Some(-1),
+                Some(7),
+                None,
+                Some(0),
+                Some(1),
+                None,
+                Some(1),
+                Some(1),
+            ])
+        );
+        assert_eq!(
+            run(
+                "SELECT COUNT(DISTINCT 1 IS NULL), MAX(ALL NOT 1), COALESCE(NOT NULL, 1 OR 0), \
+                 COUNT(*) = 1, MAX(3) > MIN(2) AND SUM(1)"
+            ),
+            ints(&[1, 0, 1, 1, 1])
+        );
+        assert_eq!(run("SELECT NOT 1 x, 1 = 1 AS y"), ints(&[0, 1]));
+        // Two conditions of `random/expr/slt_good_0.test`, lines 92 and 2444.
+        assert_eq!(
+            run("SELECT NOT ( NOT - 79 >= NULL ), NOT NULL <> COUNT ( * )"),
+            [Value::Null, Value::Null]
+        );
+        for sql in [
+            "SELECT MAX(1 = COUNT(*))",
+            "SELECT COUNT(NOT COUNT(*))",
+            "SELECT SUM(1 AND MAX(1))",
+            "SELECT MIN(COUNT(*) IS NULL)",
+        ] {
+            assert!(
+                select(sql)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("misuse of aggregate function"),
+                "{sql}"
+            );
+        }
+        // A `NOT` is one level of nesting.
+        assert_eq!(
+            run(&format!("SELECT {}1", "NOT ".repeat(MAX_DEPTH - 1))),
+            ints(&[0])
+        );
+        assert!(select(&format!("SELECT {}1", "NOT ".repeat(MAX_DEPTH))).is_err());
+        assert!(select(&format!("SELECT {}1", "NOT ".repeat(100_000))).is_err());
+    }
+
+    #[test]
+    fn other_operators_are_errors() {
+        for sql in [
+            // SQLite gives a value for each one up to `1 IS NULL ISNULL`.
+            "SELECT ~1",
+            "SELECT ~ 1",
+            "SELECT 1 || 2",
+            "SELECT 1 & 3",
+            "SELECT 1 | 2",
+            "SELECT 1 << 2",
+            "SELECT 8 >> 1",
+            "SELECT 1 BETWEEN 0 AND 2",
+            "SELECT 1 NOT BETWEEN 0 AND 2",
+            "SELECT 1 IN (1)",
+            "SELECT 1 NOT IN (1)",
+            "SELECT 1 LIKE 1",
+            "SELECT 1 NOT LIKE 1",
+            "SELECT 1 GLOB 1",
+            "SELECT 1 ISNULL",
+            "SELECT NULL ISNULL",
+            "SELECT 1 NOTNULL",
+            "SELECT NULL notnull",
+            "SELECT 1 NOT NULL",
+            "SELECT NULL NOT NULL",
+            "SELECT (1) NOT NULL",
+            "SELECT NOT 1 NOT NULL",
+            "SELECT NOT NULL ISNULL",
+            "SELECT 1 = 1 NOTNULL",
+            "SELECT 1 IS 1",
+            "SELECT 1 IS NOT 1",
+            "SELECT NULL IS 1",
+            "SELECT 1 IS (NULL)",
+            "SELECT 1 IS NOT (NULL)",
+            "SELECT 1 IS - NULL",
+            "SELECT 1 IS DISTINCT FROM 1",
+            "SELECT 1 IS NOT DISTINCT FROM 1",
+            "SELECT 1 IS DISTINCT FROM NULL",
+            "SELECT 1 IS NOT NOT NULL",
+            // SQLite reads the next six as `1 IS (NULL + 1)` and so on.
+            "SELECT 1 IS NULL + 1",
+            "SELECT 1 IS NULL < 2",
+            "SELECT NULL IS NOT NULL + 1",
+            "SELECT 1 IS NULL * 0",
+            "SELECT 1 IS NOT NULL - 1",
+            "SELECT 1 IS NULL >= 0",
+            "SELECT 1 IS NULL NOT NULL",
+            "SELECT 1 IS NULL ISNULL",
+            // SQLite gives an error for the rest.
+            "SELECT 1 == = 1",
+            "SELECT 1 = = 1",
+            "SELECT 1 < > 2",
+            "SELECT 1 ! = 2",
+            "SELECT 1 < = 2",
+            "SELECT 1 =< 2",
+            "SELECT 1 => 2",
+            "SELECT 1 >< 2",
+            "SELECT 1 ! 2",
+            "SELECT 1 AND",
+            "SELECT NOT",
+            "SELECT AND 1",
+            "SELECT 1 OR OR 1",
+            "SELECT 1 IS",
+            "SELECT 1 IS NOT",
+            "SELECT 1 NOT 1",
+            "SELECT = 1",
+            "SELECT 1 <",
+            "SELECT 1 AS not",
+            "SELECT 1 and",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT 1 IS 1").unwrap_err().to_string(),
+            "IS with a right side that is not NULL is not supported"
+        );
+        assert_eq!(
+            select("SELECT 1 IS NULL + 1").unwrap_err().to_string(),
+            "IS with a right side that is not NULL is not supported"
+        );
+        // An error in the right operand is an error, also when the left operand decides.
+        // SQLite gives 0 for the first one. The overflow is a real number there.
+        for sql in [
+            "SELECT 0 AND 9223372036854775807 + 1",
+            "SELECT 1 OR 9223372036854775807 + 1",
+            "SELECT 1 OR abs(1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
     #[test]
     fn select_list_keywords_and_aliases() {
         assert_eq!(run("select all 1 AS a, 2 b ,3"), ints(&[1, 2, 3]));
@@ -916,11 +1356,6 @@ mod tests {
             "SELECT a",
             "SELECT abs(1)",
             "SELECT CASE WHEN 1 THEN 2 END",
-            "SELECT 1 = 1",
-            "SELECT 1 < 2",
-            "SELECT 1 AND 1",
-            "SELECT NOT 1",
-            "SELECT 1 IS NULL",
             "SELECT 5 ISNULL",
             "SELECT 5 notnull",
             "SELECT 1 BETWEEN 0 AND 2",
