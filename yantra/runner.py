@@ -612,13 +612,30 @@ def git_fence(clone):
     return digest.hexdigest()
 
 
+def branch_name(number, title):
+    """The branch of a ticket: the first words of its title and its number.
+
+    The title is text from GitHub, so only a-z, 0-9 and "-" get into the name.
+    """
+    words = re.sub(r"[^a-z0-9]+", " ", str(title).lower()).split()
+    slug = "-".join(words[:4])[:40].strip("-")
+    return "%s-%d" % (slug or "ticket", number)
+
+
+def ticket_branches(refs, number):
+    """The remote branches of one ticket: each name that ends with "-<number>"."""
+    tail = "-%d" % number
+    names = [r.strip().split("/", 1)[-1] for r in refs if r.strip()]
+    return sorted(n for n in names if n.endswith(tail))
+
+
 class Run:
     def __init__(self, issue):
         self.issue = issue
         self.number = issue["number"]
-        self.branch = "ticket-%d" % self.number
+        self.branch = branch_name(self.number, issue.get("title", ""))
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.dir = os.path.join(STATE, "runs", "ticket-%d-%s" % (self.number, stamp))
+        self.dir = os.path.join(STATE, "runs", "%s-%s" % (self.branch, stamp))
         self.clone = os.path.join(self.dir, "repo")
         self.input = os.path.join(self.dir, "input")  # files that the agent can read
         self.guard = os.path.join(self.dir, "guard.sh")  # ci/guard.sh of origin/main
@@ -746,9 +763,15 @@ class Run:
 
     def make_clone(self):
         self.must(["gh", "repo", "clone", REPO, self.clone], "gh repo clone")
-        code, _, _ = self.git("show-ref", "--verify", "--quiet", "refs/remotes/origin/" + self.branch)
-        if code != 1:  # 0: the branch is there. Each other code: the check did not work.
-            raise NeedsHuman("the remote branch `%s` is there already, or the runner could not check it" % self.branch)
+        # The branch name holds the ticket title, and a title can change. So the
+        # check is on the number: each remote branch that ends with "-<N>" is a
+        # branch of this ticket, also one with the old name "ticket-<N>".
+        code, out, _ = self.git("for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/")
+        if code != 0:
+            raise NeedsHuman("the runner could not list the remote branches")
+        taken = ticket_branches(out.splitlines(), self.number)
+        if taken:
+            raise NeedsHuman("this ticket has a remote branch already: `%s`" % "`, `".join(taken))
         self.must_git("checkout", "-b", self.branch, "origin/main")
         for key in ("user.name", "user.email"):
             value = self.must(["git", "-C", MAIN_REPO, "config", key], "git config %s of %s" % (key, MAIN_REPO))
