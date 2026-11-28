@@ -1,8 +1,11 @@
-"""Tests for the pure functions of runner.py. No network, gh, git, docker or claude.
+"""Tests for runner.py. No network, gh, git, docker or claude. YtTest uses a fake docker and git.
 
 Run: python3 -m unittest discover -s yantra -p 'test_*.py'
 """
+import contextlib
+import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -147,6 +150,31 @@ class ReviewTest(unittest.TestCase):
         self.assertEqual(runner.ci_state([done, {"status": "completed", "conclusion": "failure"}]), "failure")
 
 
+class PagesTest(unittest.TestCase):
+    def test_review_on_a_later_page(self):
+        sha = "a1a1e7caa2f5080e4211538b953a375bae1ce9c7"
+        talk = [{"id": n, "updated_at": "t", "user": {"login": "somebody"}, "body": "a comment"} for n in range(100)]
+        review = {"id": 500, "updated_at": "t", "user": {"login": runner.REVIEW_AUTHOR}, "body": fixture("review-clean.md")}
+        self.assertIsNone(runner.find_review(talk, sha, set()))
+        comments = runner.join_pages([talk, [review]])
+        self.assertEqual(len(comments), 101)
+        self.assertEqual(runner.find_review(comments, sha, set())[0], "clean")
+
+    def test_failed_check_run_on_a_later_page(self):
+        good = {"status": "completed", "conclusion": "success"}
+        bad = {"status": "completed", "conclusion": "failure"}
+        pages = [{"total_count": 101, "check_runs": [good] * 100}, {"total_count": 101, "check_runs": [bad]}]
+        self.assertEqual(runner.ci_state(pages[0]["check_runs"]), "success")
+        self.assertEqual(runner.ci_state(runner.join_pages(pages, "check_runs")), "failure")
+
+    def test_gh_pages_asks_for_each_page(self):
+        calls = []
+        self.addCleanup(setattr, runner, "sh", runner.sh)
+        runner.sh = lambda cmd, **more: calls.append(cmd) or (0, "[[1], [2]]", "")
+        self.assertEqual(runner.join_pages(runner.gh_pages("repos/o/r/issues/7/comments?per_page=100")), [1, 2])
+        self.assertEqual(calls, [["gh", "api", "--paginate", "--slurp", "repos/o/r/issues/7/comments?per_page=100"]])
+
+
 class TextTest(unittest.TestCase):
     def test_pr_body(self):
         body = runner.build_pr_body(13, "https://example.test/13", ["first", "second"], 7981, 7990, 10012, ["the report"])
@@ -157,30 +185,276 @@ class TextTest(unittest.TestCase):
             "Score: 7981 -> 7990 of 10012\n",
             "Opened by the yantra runner. A person merges.\n",
             "<details>",
-            "the report",
+            "```text\nthe report\n```\n",
         ):
             self.assertIn(part, body)
         self.assertTrue(body.startswith("Closes #13\n"))
         self.assertNotIn("[x]", body)
 
+    def test_report_cannot_act_in_the_pr_body(self):
+        report = "Closes #5\n@somebody\n</details>\n```\ncode\n```\n`````\nmore"
+        block = runner.fenced(report)
+        lines = block.split("\n")
+        self.assertEqual((lines[0], lines[-1]), ("``````text", "``````"))  # 6: one more than the longest run
+        self.assertEqual("\n".join(lines[1:-1]), report)
+        body = runner.build_pr_body(13, "u", ["first"], 1, 2, 3, [report])
+        self.assertLess(body.index("``````text"), body.index("Closes #5"))
+        self.assertLess(body.index("</details>\n```"), body.rindex("``````"))
+        self.assertEqual(len(runner.fenced("x" * 30000)), 20000 + len("```text\n\n```"))
+
     def test_agent_command(self):
-        command = runner.agent_command("<prompt>")
-        self.assertEqual(command[:3], ["claude", "-p", "<prompt>"])
-        self.assertIn("Bash(git add *)", command)
-        self.assertEqual([part for part in command if "push" in part or "gh" in part or "Web" in part], [])
+        command = runner.agent_command("<prompt>", "/state/runs/t/repo", "/state/runs/t")
+        self.assertEqual(command[:5], ["claude", "-p", "<prompt>", "--tools", "Read,Edit,Write,Glob,Grep,Bash"])
+        allow = command[command.index("--allowedTools") + 1 : command.index("--disallowedTools")]
+        self.assertEqual(
+            allow,
+            [
+                "Read(//state/runs/t/repo/**)",
+                "Read(//state/runs/t/input/**)",
+                "Edit(//state/runs/t/repo/**)",
+                "Bash(/state/runs/t/bin/yt *)",
+            ],
+        )
+        deny = command[command.index("--disallowedTools") + 1 : command.index("--permission-mode")]
+        self.assertEqual(deny, ["Edit(//state/runs/t/repo/.git/**)"])
+        rest = command[command.index("--permission-mode") :]
+        self.assertEqual(rest, ["--permission-mode", "dontAsk", "--strict-mcp-config", "--safe-mode"])
+        rules = " ".join(allow)
+        for word in ("docker", "git ", "ls", "cat", "Write(", "Glob", "Grep"):
+            self.assertNotIn(word, rules)
 
     def test_prompt(self):
-        prompt = runner.build_prompt("the brief", issue(), runner.review_text("/run/review-1.md"))
+        prompt = runner.build_prompt("the brief", "/run", issue(), runner.review_text("/run/input/review-1.md"))
         self.assertTrue(prompt.startswith("the brief\n"))
+        self.assertIn("`/run/bin/yt`", prompt)
+        self.assertIn("`/run/input/`", prompt)
         self.assertIn("Title: t\nURL: u\n", prompt)
-        self.assertIn("`/run/review-1.md`", prompt)
+        self.assertIn("`/run/input/review-1.md`", prompt)
+
+
+FAKE_DOCKER = """#!/bin/sh
+echo "docker $*" >> "$YT_TEST_LOG"
+if [ "$1" = image ]; then exit "${YT_TEST_NO_IMAGE:-0}"; fi
+"""
+FAKE_GIT = """#!/bin/sh
+echo "git[$GIT_CONFIG_GLOBAL $GIT_CONFIG_SYSTEM] $*" >> "$YT_TEST_LOG"
+"""
+
+
+class YtTest(unittest.TestCase):
+    """The generated wrapper, with a fake docker and a fake git on the PATH."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = os.path.realpath(tmp.name)
+        self.clone = os.path.join(self.root, "repo")
+        self.log = os.path.join(self.root, "log")
+        os.makedirs(os.path.join(self.clone, "sub"))
+        os.makedirs(os.path.join(self.root, "bin"))
+        for name, text in (("docker", FAKE_DOCKER), ("git", FAKE_GIT), ("yt", runner.yt_script(self.clone))):
+            path = os.path.join(self.root, "bin", name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(path, 0o755)
+        for path in ("repo/sub/q.sql", "outside.sql"):
+            with open(os.path.join(self.root, path), "w", encoding="utf-8") as f:
+                f.write("SELECT 1\n")
+        os.symlink(os.path.join(self.root, "outside.sql"), os.path.join(self.clone, "link.sql"))
+
+    def yt(self, *args, **env):
+        """Return (exit code, stderr, the docker and git calls)."""
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        env.update(PATH=os.path.join(self.root, "bin") + ":/usr/bin:/bin", YT_TEST_LOG=self.log)
+        yt = os.path.join(self.root, "bin", "yt")
+        done = subprocess.run([yt] + list(args), cwd=self.clone, env=env, capture_output=True, encoding="utf-8")
+        calls = []
+        if os.path.exists(self.log):
+            with open(self.log, encoding="utf-8") as f:
+                calls = f.read().splitlines()
+        return done.returncode, done.stderr, calls
+
+    def test_the_script_is_correct_sh(self):
+        yt = os.path.join(self.root, "bin", "yt")
+        self.assertEqual(subprocess.run(["sh", "-n", yt]).returncode, 0)
+        self.assertEqual(os.stat(yt).st_mode & 0o777, 0o755)
+
+    def test_check_and_failures(self):
+        box = "docker run --rm --network none --pull never -v %s:/src:ro " % self.clone
+        code, _, calls = self.yt("check")
+        self.assertEqual((code, calls), (0, [box + "yantra-rust:1.96.1 sh -c " + runner.BUILD_SCRIPT]))
+        code, _, calls = self.yt("failures", "20")
+        self.assertEqual((code, calls), (0, [box + "-e SLT_FAILURES=20 yantra-rust:1.96.1 sh -c " + runner.FAILURES_SCRIPT]))
+
+    def test_sqlite_takes_a_file_inside_the_clone(self):
+        for name in ("sub/q.sql", os.path.join(self.clone, "sub", "q.sql"), "sub/../sub/q.sql"):
+            code, _, calls = self.yt("sqlite", name)
+            self.assertEqual(code, 0)
+            self.assertEqual(calls[0], "docker image inspect python:3.13-slim")
+            box = "docker run --rm --network none --pull never -v %s:/src:ro " % self.clone
+            self.assertTrue(calls[1].startswith(box + "python:3.13-slim python3 -c "))
+            self.assertEqual(calls[-1].split()[-1], "/src/sub/q.sql")
+            self.assertEqual(" ".join(calls).count(" -v "), 1)
+
+    def test_sqlite_says_when_the_image_is_missing(self):
+        code, err, calls = self.yt("sqlite", "sub/q.sql", YT_TEST_NO_IMAGE="1")
+        self.assertEqual((code, calls), (3, ["docker image inspect python:3.13-slim"]))
+        self.assertIn("python:3.13-slim is not on this machine", err)
+
+    def test_status_and_diff(self):
+        git = "git[/dev/null /dev/null] -c core.hooksPath=/dev/null -C %s " % self.clone
+        self.assertEqual(self.yt("status"), (0, "", [git + "status --porcelain"]))
+        self.assertEqual(self.yt("diff"), (0, "", [git + "diff"]))
+
+    def test_each_other_call_is_refused(self):
+        bad = [
+            [],
+            ["bogus"],
+            ["docker", "run", "x"],
+            ["check", "extra"],
+            ["failures"],
+            ["failures", ""],
+            ["failures", "x"],
+            ["failures", "3; id"],
+            ["failures", "3", "4"],
+            ["sqlite"],
+            ["sqlite", "/etc/passwd"],
+            ["sqlite", "../outside.sql"],
+            ["sqlite", os.path.join(self.root, "outside.sql")],
+            ["sqlite", "link.sql"],
+            ["sqlite", "none.sql"],
+            ["sqlite", "sub"],
+            ["status", "--porcelain"],
+            ["diff", "--output=/tmp/x"],
+        ]
+        for args in bad:
+            code, err, calls = self.yt(*args)
+            self.assertEqual((code, calls), (2, []), args)
+            self.assertTrue(err.startswith("yt: "), args)
+
+
+class LabelTest(unittest.TestCase):
+    """The labels at the start and at the end of a run, with the GitHub writes replaced."""
+
+    def setUp(self):
+        self.calls = []
+        self.fail = {}  # (action, label) -> the number of times that it fails
+        for name in ("add_label", "remove_label", "add_comment", "RETRY_WAIT_S", "STATE"):
+            self.addCleanup(setattr, runner, name, getattr(runner, name))
+        self.state = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state.cleanup)
+        self.real_remove_label = runner.remove_label
+        runner.RETRY_WAIT_S = 0
+        runner.add_label = lambda number, label: self.write("add", number, label)
+        runner.remove_label = lambda number, label: self.write("remove", number, label)
+        runner.add_comment = lambda number, text: self.write("comment", number, "")
+
+    def write(self, action, number, label):
+        self.calls.append((action, number, label))
+        if self.fail.get((action, label), 0) > 0:
+            self.fail[(action, label)] -= 1
+            return 1, "", "HTTP 502"
+        return 0, "", ""
+
+    def test_claim(self):
+        self.assertIsNone(runner.claim(13, True))
+        self.assertEqual(self.calls, [("add", 13, "agent-working"), ("remove", 13, "agent-go")])
+
+    def test_claim_of_a_manual_run_without_agent_go(self):
+        self.assertIsNone(runner.claim(13, False))
+        self.assertEqual(self.calls, [("add", 13, "agent-working")])
+
+    def test_claim_when_the_add_fails_keeps_agent_go(self):
+        self.fail[("add", "agent-working")] = 1
+        self.assertIn("agent-working", runner.claim(13, True))
+        self.assertEqual(self.calls, [("add", 13, "agent-working")])
+
+    def test_claim_when_the_removal_fails_takes_agent_working_off_again(self):
+        self.fail[("remove", "agent-go")] = 1
+        self.assertIn("agent-go", runner.claim(13, True))
+        self.assertEqual(self.calls, [("add", 13, "agent-working"), ("remove", 13, "agent-go"), ("remove", 13, "agent-working")])
+
+    def test_a_label_that_is_not_on_the_issue_is_removed(self):
+        self.addCleanup(setattr, runner, "sh", runner.sh)
+        runner.sh = lambda cmd, **more: (1, "", "gh: Label does not exist (HTTP 404)")
+        self.assertEqual(self.real_remove_label(13, "agent-go")[0], 0)
+        runner.sh = lambda cmd, **more: (1, "", "gh: Server Error (HTTP 502)")
+        self.assertEqual(self.real_remove_label(13, "agent-go")[0], 1)
+
+    def finish(self, ready, pr=7):
+        runner.STATE = tempfile.mkdtemp(dir=self.state.name)
+        run = runner.Run(issue())
+        run.pr = pr
+        self.printed = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(self.printed):
+            return run.finish(ready, "the note"), run
+
+    def test_finish_ready(self):
+        code, run = self.finish(True)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.calls,
+            [("comment", 13, ""), ("add", 7, "ready-for-human"), ("remove", 13, "agent-go"), ("remove", 13, "agent-working")],
+        )
+        self.assertFalse(os.path.exists(os.path.join(run.dir, "HANDOFF_FAILED")))
+
+    def test_finish_needs_a_human(self):
+        code, run = self.finish(False)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            self.calls,
+            [
+                ("comment", 13, ""),
+                ("add", 7, "needs-human"),
+                ("add", 13, "needs-human"),
+                ("remove", 13, "agent-go"),
+                ("remove", 13, "agent-working"),
+            ],
+        )
+        self.calls = []
+        self.assertEqual(self.finish(False, pr=None)[0], 1)
+        self.assertEqual(self.calls[1], ("add", 13, "needs-human"))
+
+    def test_finish_tries_a_write_again(self):
+        self.fail[("add", "ready-for-human")] = 2
+        code, run = self.finish(True)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls.count(("add", 7, "ready-for-human")), 3)
+        self.assertEqual(self.calls[-1], ("remove", 13, "agent-working"))
+
+    def test_finish_with_a_lost_label_is_exit_code_3(self):
+        self.fail[("add", "needs-human")] = 99
+        code, run = self.finish(False)
+        self.assertEqual(code, 3)
+        self.assertEqual(self.calls.count(("add", 7, "needs-human")), 3)
+        self.assertEqual(self.calls.count(("add", 13, "needs-human")), 3)
+        self.assertIn(("remove", 13, "agent-go"), self.calls)
+        self.assertNotIn(("remove", 13, "agent-working"), self.calls)  # it stays as the mark
+        with open(os.path.join(run.dir, "HANDOFF_FAILED"), encoding="utf-8") as f:
+            text = f.read()
+        for part in ("`needs-human` on pull request #7", "`needs-human` on issue #13", "`agent-working` is still on", "the note"):
+            self.assertIn(part, text)
+        self.assertIn("writes to GitHub failed", self.printed.getvalue())  # on stderr
+
+    def test_finish_with_a_lost_comment_or_a_lost_removal_is_exit_code_3(self):
+        self.fail[("comment", "")] = 99
+        self.assertEqual(self.finish(True)[0], 3)
+        self.fail = {("remove", "agent-working"): 99}
+        code, run = self.finish(True)
+        self.assertEqual(code, 3)
+        with open(os.path.join(run.dir, "HANDOFF_FAILED"), encoding="utf-8") as f:
+            self.assertIn("the removal of `agent-working`", f.read())
 
 
 class FlowTest(unittest.TestCase):
     """The loop of Run.work, with each outside step replaced. No process starts."""
 
-    def flow(self, reviews, checks=(), commits=True):
-        """reviews: (kind, ci) of each wait. checks: the result of each check round, then None."""
+    def flow(self, reviews, checks=(), changes=()):
+        """reviews: (kind, ci) of each wait. checks: the result of each check round, then None.
+
+        changes: for each agent round, True when the agent changed a file. Then True.
+        """
         state = tempfile.TemporaryDirectory()
         self.addCleanup(state.cleanup)
         self.addCleanup(setattr, runner, "STATE", runner.STATE)
@@ -197,6 +471,7 @@ class FlowTest(unittest.TestCase):
         self.pushes = 0
         reviews = iter(reviews)
         checks = iter(checks)
+        changes = iter(changes)
 
         def start_agent(prompt):
             run.starts += 1
@@ -205,7 +480,7 @@ class FlowTest(unittest.TestCase):
         def push(criteria):
             self.pushes += 1
             run.pr = 7
-            return run.head()
+            return "head-%d" % run.starts
 
         def wait_for_review(sha, seen):
             kind, ci = next(reviews)
@@ -213,7 +488,7 @@ class FlowTest(unittest.TestCase):
 
         run.make_clone = lambda: None
         run.start_agent = start_agent
-        run.head = lambda: "head-%d" % (run.starts if commits else 0)
+        run.commit = lambda: next(changes, True)
         run.checks = lambda scope: next(checks, None)
         run.push = push
         run.wait_for_review = wait_for_review
@@ -225,6 +500,7 @@ class FlowTest(unittest.TestCase):
     def test_clean_review_is_ready(self):
         state, note, run = self.flow([("clean", "success")])
         self.assertEqual((state, run.starts, self.pushes), ("ready", 1, 1))
+        self.assertIn(os.path.join(run.dir, "bin", "yt"), self.prompts[0])
 
     def test_clean_review_with_red_ci_needs_a_human(self):
         self.assertEqual(self.flow([("clean", "failure")])[0], "needs")
@@ -239,14 +515,21 @@ class FlowTest(unittest.TestCase):
         state, note, run = self.flow([("findings", "success"), ("not_reviewed", "success")])
         self.assertEqual((state, run.starts, self.pushes), ("ready", 2, 2))
         self.assertIn("earlier Qodo review", note)
-        self.assertIn(os.path.join(run.dir, "review-1.md"), self.prompts[1])
+        review = os.path.join(run.dir, "input", "review-1.md")
+        self.assertIn(review, self.prompts[1])
+        with open(review, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "the review")
 
     def test_findings_three_times_needs_a_human(self):
         state, note, run = self.flow([("findings", "success")] * 3)
         self.assertEqual((state, run.starts, self.pushes), ("needs", 3, 3))
 
-    def test_findings_and_no_new_commit_needs_a_human(self):
-        state, note, run = self.flow([("findings", "success")], commits=False)
+    def test_no_change_in_the_first_round_needs_a_human(self):
+        state, note, run = self.flow([], changes=[False])
+        self.assertEqual((state, run.starts, self.pushes), ("needs", 1, 0))
+
+    def test_no_change_in_a_review_round_needs_a_human(self):
+        state, note, run = self.flow([("findings", "success")], changes=[True, False])
         self.assertEqual((state, run.starts, self.pushes), ("needs", 2, 1))
 
     def test_went_wrong_is_asked_again_one_time(self):
@@ -259,7 +542,11 @@ class FlowTest(unittest.TestCase):
         failed = ("build", "error[E0308]: mismatched types")
         state, note, run = self.flow([("clean", "success")], checks=[failed])
         self.assertEqual((state, run.starts, self.pushes), ("ready", 2, 1))
-        self.assertIn("error[E0308]", self.prompts[1])
+        output = os.path.join(run.dir, "input", "check-1.txt")
+        self.assertIn(output, self.prompts[1])
+        self.assertNotIn("E0308", self.prompts[1])  # the output is in the file, not in the prompt
+        with open(output, encoding="utf-8") as f:
+            self.assertEqual(f.read(), failed[1])
         state, note, run = self.flow([], checks=[failed] * 3)
         self.assertEqual((state, run.starts, self.pushes), ("needs", 3, 0))
 
