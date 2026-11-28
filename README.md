@@ -92,6 +92,15 @@ The engine computes each part of a `CASE`, so an error in a part that SQLite doe
 The engine returns an error for each other statement, expression or function, for a wrong number of arguments and for integer overflow.
 A SQLite keyword is not accepted as an alias.
 An expression that is nested more than 100 levels deep is an error.
+This is the engine's own limit on parentheses, unary operators, `CASE`, `CAST` and function calls inside each other.
+SQLite accepts deeper nesting: 1001 pairs of parentheses and 999 unary minus signs work there.
+Three limits are from https://www.sqlite.org/limits.html.
+A `SELECT` has 2000 result columns at most.
+A function call has 1000 arguments at most, the default since SQLite 3.48.0.
+The expression tree has a height of 1000 at most.
+An integer literal, `NULL` and `COUNT(*)` have height 1, parentheses add nothing, and each operator, `CAST`, `CASE` and function call has the height of its highest part plus 1.
+So a sum of 1000 terms works and a sum of 1001 terms is an error.
+An `AND` with the integer literal 0 as an operand has height 1, because SQLite's parser replaces it with the literal 0.
 Score: 9644 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 ## Rules and checks
