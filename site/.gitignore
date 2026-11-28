@@ -1,0 +1,6 @@
+# The outputs of the build. README.md has the commands that make them.
+/dist/
+/wasm/target/
+/slt-map.tsv
+/score-map.svg
+/score.json

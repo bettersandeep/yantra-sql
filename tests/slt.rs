@@ -3,6 +3,8 @@
 //! Prints one line for each file: `slt: <file> <passed>/<applicable>`.
 //! `tests/slt/baseline.txt` holds the exact pass count of each file.
 //! Set `SLT_FAILURES=<n>` to print the first n records that fail in each file.
+//! Set `SLT_MAP=<path>` to write one line for each applicable record to that file:
+//! `<file>\t<line>\tP` for a record that passes, and `F` for one that fails.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -331,6 +333,12 @@ fn check_baseline(measured: &BTreeMap<String, usize>, baseline: &str) -> Vec<Str
     errors
 }
 
+/// One line of the `SLT_MAP` file. `line` is the line number of the record header.
+fn map_line(file: &str, line: usize, passed: bool) -> String {
+    let mark = if passed { 'P' } else { 'F' };
+    format!("{file}\t{line}\t{mark}\n")
+}
+
 /// Collects the `*.test` files under `dir`, with paths relative to the first `dir`.
 fn find_tests(dir: &Path, prefix: &str, files: &mut Vec<String>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -358,6 +366,7 @@ fn slt() {
     assert!(!files.is_empty(), "no test files under tests/slt");
 
     let mut measured = BTreeMap::new();
+    let mut map = String::new();
     for file in files {
         let text = fs::read_to_string(root.join(&file)).unwrap();
         let records = parse(&text).unwrap_or_else(|error| panic!("{file}: {error}"));
@@ -365,9 +374,11 @@ fn slt() {
         let mut passed = 0;
         let mut shown = 0;
         for record in &records {
-            match run(record, &mut |sql| {
+            let result = run(record, &mut |sql| {
                 db.execute(sql).map_err(|e| e.to_string())
-            }) {
+            });
+            map.push_str(&map_line(&file, record.line, result.is_ok()));
+            match result {
                 Ok(()) => passed += 1,
                 Err(got) if shown < show => {
                     shown += 1;
@@ -390,6 +401,9 @@ fn slt() {
         }
         println!("slt: {file} {passed}/{}", records.len());
         measured.insert(file, passed);
+    }
+    if let Some(path) = env::var_os("SLT_MAP") {
+        fs::write(path, map).unwrap();
     }
 
     let baseline = fs::read_to_string(root.join("baseline.txt")).unwrap();
@@ -553,6 +567,12 @@ fn run_decides_pass_or_fail() {
     assert_eq!(run(&query_two, &mut one), Err("1".to_string()));
     // A hash cannot be checked, so the record fails for each result.
     assert!(run(&record(hash), &mut one).is_err());
+}
+
+#[test]
+fn map_line_has_the_file_the_line_and_the_mark() {
+    assert_eq!(map_line("dir/a.test", 7, true), "dir/a.test\t7\tP\n");
+    assert_eq!(map_line("dir/a.test", 12, false), "dir/a.test\t12\tF\n");
 }
 
 #[test]

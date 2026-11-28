@@ -1,0 +1,46 @@
+name: pages
+# Builds the demo site in site/ and publishes it with GitHub Pages.
+# A push to main starts it. A person can also start it by hand, on each branch.
+# Each job has a condition and runs only for main, so each file that it runs is a file of main.
+# It needs one setting of the repo: Settings, Pages, Source: "GitHub Actions".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+# One deployment at a time. A run that is in progress finishes.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup target add wasm32-unknown-unknown
+      - run: python3 -m unittest discover -s site -p 'test_*.py'
+      - run: cargo test --locked --manifest-path site/wasm/Cargo.toml
+      # The score map comes from this run of the harness.
+      - run: SLT_MAP="$RUNNER_TEMP/slt-map.tsv" cargo test --locked --test slt
+      - run: python3 site/make_map.py "$RUNNER_TEMP/slt-map.tsv" "$GITHUB_SHA"
+      - run: sh site/build.sh
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
