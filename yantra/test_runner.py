@@ -5,7 +5,6 @@ Run: python3 -m unittest discover -s yantra -p 'test_*.py'
 import contextlib
 import io
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -214,7 +213,6 @@ class TextTest(unittest.TestCase):
                 "Read(//state/runs/t/repo/**)",
                 "Read(//state/runs/t/input/**)",
                 "Edit(//state/runs/t/repo/**)",
-                "Bash(../bin/yt *)",
                 "Bash(/state/runs/t/bin/yt *)",
             ],
         )
@@ -226,22 +224,13 @@ class TextTest(unittest.TestCase):
         for word in ("docker", "git ", "ls", "cat", "Write(", "Glob", "Grep"):
             self.assertNotIn(word, rules)
 
-    def test_a_state_directory_with_a_space(self):
-        run_dir = "/Users/x/Library/Application Support/yantra/runs/t"
-        command = runner.agent_command("<prompt>", run_dir + "/repo", run_dir)
-        self.assertEqual(len(command), 17)  # each rule is one argument, with its space inside
-        for rule in (
-            "Read(//Users/x/Library/Application Support/yantra/runs/t/repo/**)",
-            "Read(//Users/x/Library/Application Support/yantra/runs/t/input/**)",
-            "Edit(//Users/x/Library/Application Support/yantra/runs/t/repo/**)",
-            "Edit(//Users/x/Library/Application Support/yantra/runs/t/repo/.git/**)",
-            "Bash(../bin/yt *)",  # the text of this call has no space
-            "Bash('/Users/x/Library/Application Support/yantra/runs/t/bin/yt' *)",
-        ):
-            self.assertIn(rule, command)
-        prompt = runner.build_prompt("the brief", run_dir, issue())
-        self.assertIn("`../bin/yt check`", prompt)
-        self.assertIn("`'/Users/x/Library/Application Support/yantra/runs/t/bin/yt' check`", prompt)
+    def test_the_only_command_rule_is_a_full_path(self):
+        command = runner.agent_command("<prompt>", "/state/runs/t/repo", "/state/runs/t")
+        bash = [part for part in command if part.startswith("Bash(")]
+        self.assertEqual(bash, ["Bash(/state/runs/t/bin/yt *)"])
+        self.assertNotIn("..", " ".join(command))
+        prompt = runner.build_prompt("the brief", "/state/runs/t", issue())
+        self.assertNotIn("..", prompt)
 
     def test_the_default_state_is_not_a_cache_folder(self):
         self.assertNotIn("Caches", runner.STATE_DEFAULT)
@@ -251,8 +240,8 @@ class TextTest(unittest.TestCase):
     def test_prompt(self):
         prompt = runner.build_prompt("the brief", "/run", issue(), runner.review_text("/run/input/review-1.md"))
         self.assertTrue(prompt.startswith("the brief\n"))
-        self.assertIn("`../bin/yt check`", prompt)
         self.assertIn("`/run/bin/yt check`", prompt)
+        self.assertIn("`/run/repo`", prompt)
         self.assertIn("`/run/input/`", prompt)
         self.assertIn("Title: t\nURL: u\n", prompt)
         self.assertIn("`/run/input/review-1.md`", prompt)
@@ -268,52 +257,65 @@ echo "git[$GIT_CONFIG_GLOBAL $GIT_CONFIG_SYSTEM] $*" >> "$YT_TEST_LOG"
 
 
 class YtTest(unittest.TestCase):
-    """The generated wrapper, with a fake docker and a fake git on the PATH.
-
-    The run directory has a space, as the state directory of macOS has.
-    """
+    """The generated wrapper, with a fake docker and a fake git on its fixed PATH."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = os.path.join(os.path.realpath(tmp.name), "Application Support", "t")
-        os.makedirs(self.root)
+        self.root = os.path.realpath(tmp.name)
         self.clone = os.path.join(self.root, "repo")
         self.log = os.path.join(self.root, "log")
+        self.cwd = self.clone  # the working directory of the agent
         os.makedirs(os.path.join(self.clone, "sub"))
         os.makedirs(os.path.join(self.root, "bin"))
-        for name, text in (("docker", FAKE_DOCKER), ("git", FAKE_GIT), ("yt", runner.yt_script(self.clone))):
-            path = os.path.join(self.root, "bin", name)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.chmod(path, 0o755)
+        # "." and "bin" are relative parts of a PATH. The wrapper must drop them.
+        path = ".:bin::" + os.path.join(self.root, "bin") + ":/usr/bin:/bin"
+        for name, text in (("docker", FAKE_DOCKER), ("git", FAKE_GIT), ("yt", runner.yt_script(self.clone, path))):
+            self.tool(os.path.join(self.root, "bin", name), text)
         for path in ("repo/sub/q.sql", "outside.sql"):
             with open(os.path.join(self.root, path), "w", encoding="utf-8") as f:
                 f.write("SELECT 1\n")
         os.symlink(os.path.join(self.root, "outside.sql"), os.path.join(self.clone, "link.sql"))
-        self.call = runner.yt_calls(self.root)[0]
 
-    def test_both_call_texts_start_the_wrapper(self):
-        short, full = runner.yt_calls(self.root)
-        self.assertEqual(short, "../bin/yt")
-        self.assertIn(" ", self.root)
-        for self.call in (short, full):
-            self.assertEqual(self.yt("status")[0], 0)
-            self.assertEqual(self.yt("bogus")[0], 2)
+    def tool(self, path, text):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(path, 0o755)
 
     def yt(self, *args, **env):
         """Return (exit code, stderr, the docker and git calls)."""
         if os.path.exists(self.log):
             os.remove(self.log)
-        env.update(PATH=os.path.join(self.root, "bin") + ":/usr/bin:/bin", YT_TEST_LOG=self.log)
-        # The call goes through a shell, with the text that the agent gets.
-        call = " ".join([self.call] + [shlex.quote(arg) for arg in args])
-        done = subprocess.run(["sh", "-c", call], cwd=self.clone, env=env, capture_output=True, encoding="utf-8")
+        # The PATH of the caller has no docker and no git. The wrapper has its own PATH.
+        env.setdefault("PATH", "/usr/bin:/bin")
+        env.update(YT_TEST_LOG=self.log)
+        yt = os.path.join(self.root, "bin", "yt")
+        done = subprocess.run([yt] + list(args), cwd=self.cwd, env=env, capture_output=True, encoding="utf-8")
         calls = []
         if os.path.exists(self.log):
             with open(self.log, encoding="utf-8") as f:
                 calls = f.read().splitlines()
         return done.returncode, done.stderr, calls
+
+    def test_the_wrapper_does_not_depend_on_the_agent(self):
+        """Not on its working directory, and not on its PATH."""
+        with open(os.path.join(self.root, "bin", "yt"), encoding="utf-8") as f:
+            self.assertIn("\nPATH=%s:/usr/bin:/bin\n" % os.path.join(self.root, "bin"), f.read())
+        # The agent goes into a folder of the clone and puts files with the names of the tools there.
+        self.cwd = os.path.join(self.clone, "sub")
+        evil = "#!/bin/sh\necho evil >> \"$YT_TEST_LOG\"\n"
+        os.makedirs(os.path.join(self.clone, "bin"))
+        for path in ("sub/docker", "sub/git", "sub/dirname", "bin/yt", "bin/docker"):
+            self.tool(os.path.join(self.clone, path), evil)
+        git = "git[/dev/null /dev/null] -c core.hooksPath=/dev/null -C %s " % self.clone
+        for path in ("/usr/bin:/bin", ".:" + self.cwd + ":/usr/bin:/bin"):
+            code, _, calls = self.yt("status", PATH=path)
+            self.assertEqual((code, calls), (0, [git + "status --porcelain"]))
+            code, _, calls = self.yt("check", PATH=path)
+            self.assertEqual((code, len(calls), calls[0].split()[0]), (0, 1, "docker"))
+            code, _, calls = self.yt("sqlite", "q.sql", PATH=path)  # sub/q.sql, from the folder sub
+            self.assertEqual((code, calls[-1].split()[-1]), (0, "/src/sub/q.sql"))
+            self.assertNotIn("evil", calls)
 
     def test_the_script_is_correct_sh(self):
         yt = os.path.join(self.root, "bin", "yt")
@@ -520,6 +522,24 @@ class StartTest(unittest.TestCase):
         self.assertIn("docker image inspect " + runner.RUST_IMAGE, self.calls())
         self.assertIn("docker image inspect " + runner.GUARD_IMAGE, self.calls())
 
+    def test_a_state_path_that_the_rule_cannot_hold_stops_the_run(self):
+        self.addCleanup(setattr, runner, "STATE", runner.STATE)
+        bad = ["/Users/x/Library/Application Support/yantra", "/tmp/a\tb", "/tmp/it's", '/tmp/a"b', "/tmp/a*b", "/tmp/a(b)"]
+        for runner.STATE in bad:
+            if os.path.exists(self.log):
+                os.remove(self.log)
+            problems = runner.preconditions()
+            self.assertEqual(len(problems), 1, runner.STATE)
+            self.assertIn("YANTRA_STATE", problems[0])
+            printed = io.StringIO()
+            with contextlib.redirect_stderr(printed):
+                self.assertEqual(runner.run_ticket(18), 2)
+            self.assertIn("the state directory `%s`" % runner.STATE, printed.getvalue())
+            # gh was asked for the login only: no issue read, no label, no comment.
+            self.assertEqual([call for call in self.calls() if call.startswith("gh")], ["gh auth status"] * 2)
+        for runner.STATE in ("/Users/x/.local/state/yantra", "/home/é_1/state-2/yantra+x"):
+            self.assertEqual(runner.preconditions(), [])
+
     def test_a_missing_image_stops_the_run_before_a_write(self):
         for image in (runner.RUST_IMAGE, runner.GUARD_IMAGE):
             os.environ["YT_TEST_MISSING"] = image
@@ -540,7 +560,7 @@ class LostStateTest(unittest.TestCase):
     def setUp(self):
         self.writes = []
         self.fail = False
-        names = ("add_label", "remove_label", "add_comment", "RETRY_WAIT_S", "STATE", "POLL_S", "gh_pages")
+        names = ("add_label", "remove_label", "add_comment", "RETRY_WAIT_S", "STATE", "POLL_S", "gh_pages", "HOLDS_LOCK")
         names += ("preconditions", "read_issue", "ensure_labels")
         for name in names:
             self.addCleanup(setattr, runner, name, getattr(runner, name))
@@ -594,6 +614,71 @@ class LostStateTest(unittest.TestCase):
         runner.drop_lock()
         self.assertTrue(runner.take_lock())  # and a later run makes the directory again
         runner.drop_lock()
+        self.assertIsNone(runner.lock_owner())
+
+    def read_log(self, run):
+        with open(run.logpath, encoding="utf-8") as f:
+            return f.read()
+
+    def test_a_run_puts_its_lock_back_after_a_loss(self):
+        self.assertTrue(runner.take_lock())  # the active run
+        run = runner.Run(issue())
+        run.log("first")
+        self.lose_state()
+        self.assertIsNone(runner.lock_owner())
+        run.log("second")  # the run goes on, for example in the wait for the review
+        self.assertEqual(runner.lock_owner(), os.getpid())
+        self.assertIn("The runner put it back.", self.read_log(run))
+        self.assertFalse(runner.take_lock())  # so a competing tick does not start
+        runner.drop_lock()
+        self.assertIsNone(runner.lock_owner())
+
+    def test_a_run_does_not_remove_the_lock_of_a_later_tick(self):
+        self.assertTrue(runner.take_lock())  # the active run
+        run = runner.Run(issue())
+        self.lose_state()
+        # A competing tick starts before the run writes its next log line. It is a different live process.
+        tick = os.getppid()
+        os.makedirs(os.path.join(runner.STATE, "lock"))
+        with open(os.path.join(runner.STATE, "lock", "pid"), "w", encoding="utf-8") as f:
+            f.write(str(tick))
+        run.log("second")
+        self.assertEqual(runner.lock_owner(), tick)  # the run leaves the lock of the tick
+        self.assertIn("process %d holds a new lock" % tick, self.read_log(run))
+        runner.drop_lock()  # the first run ends
+        self.assertEqual(runner.lock_owner(), tick)  # the lock of the tick is still there
+        self.assertFalse(self.quiet(runner.take_lock))  # and a third start is refused
+
+    def test_log_without_the_lock_makes_no_lock(self):
+        run = runner.Run(issue())
+        self.lose_state()
+        run.log("second")
+        self.assertIsNone(runner.lock_owner())
+
+    def test_no_token_leaves_the_runner(self):
+        token = "ghp_" + "A1b2" * 9  # made here, so that this file holds no text with the shape of a token
+        self.assertEqual(runner.redact("x %s y" % token), "x <token> y")
+
+        def work(run):
+            self.lose_state(for_ever=True)  # so the log and HANDOFF_FAILED go to stderr too
+            raise RuntimeError("gh api: bad credentials for %s" % token)
+
+        runner.Run.work = work
+        self.fail = True
+
+        def add_label(number, label):  # the start works, and then each write fails with the token in its text
+            return (0, "", "") if label == "agent-working" else (1, "", "gh: denied for %s (HTTP 401)" % token)
+
+        runner.add_label = add_label
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+            self.assertEqual(runner.run_ticket(13), 3)
+        text = printed.getvalue() + "".join(str(write) for write in self.writes if write[0] == "comment")
+        wanted = ("Traceback", "RuntimeError", "bad credentials for <token>", "denied for <token>")
+        for part in wanted + ("HANDOFF_FAILED is not writable",):
+            self.assertIn(part, text)
+        self.assertNotIn(token, text)
+        self.assertNotIn("ghp_", text)
 
     def crash_in_work(self, for_ever):
         def work(run):

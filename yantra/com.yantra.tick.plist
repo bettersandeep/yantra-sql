@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- launchd user agent of the yantra runner. install.sh fills in __REPO__, __HOME__ and __STATE__.
-     __STATE__ can have a space. Each string here is one path, and no shell reads it. -->
+<!-- launchd user agent of the yantra runner. install.sh fills in __REPO__, __HOME__ and __STATE__. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>

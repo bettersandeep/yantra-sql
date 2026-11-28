@@ -1,8 +1,8 @@
 #!/bin/sh
 # Installs the launchd user agent that runs `runner.py tick` every 600 seconds.
 # It installs nothing else. uninstall.sh removes it.
-# The state directory is not in a cache folder, because a cleanup tool can empty that
-# during a run.
+# The plist keeps the state path of the time of the install. Run this again after
+# an update of the checkout, so that the plist gets the current default.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(dirname "$here")
@@ -18,6 +18,7 @@ sed -e "s|__REPO__|$repo|g" -e "s|__HOME__|$HOME|g" -e "s|__STATE__|$state|g" \
 	"$here/com.yantra.tick.plist" >"$target"
 plutil -lint "$target"
 echo "wrote $target"
+echo "the plist has YANTRA_STATE=\"$state\""
 
 if launchctl bootout "$domain/com.yantra.tick" 2>/dev/null; then
 	echo "unloaded the old com.yantra.tick"

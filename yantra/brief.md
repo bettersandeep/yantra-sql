@@ -28,6 +28,7 @@ The paths of this run and the ticket are below this brief.
 - You can edit and write files in the clone, but not in `.git/`.
 - You have one command, `yt`.
   The part "This run" below gives the exact text that starts a call.
+  It is the full path of `yt`.
   Use that text, and one `yt` command in each call.
 - You have no other command.
   There is no `git`, no `docker`, no `cargo`, no `ls`, no `cat` and no network.

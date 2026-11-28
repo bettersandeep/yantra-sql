@@ -26,11 +26,12 @@ from datetime import datetime, timezone
 # Config.
 REPO = "bettersandeep/lekha"
 # The state is not in a cache folder: a cleanup tool can empty a cache folder during a run.
-# The macOS path has a space, so each shell use of it needs quotes.
-# No space in the path: the agent's one Bash rule compares the text of the command.
 STATE_DEFAULT = "~/.local/state/yantra"
 # realpath: the permission rules of the agent compare real paths.
 STATE = os.path.realpath(os.path.expanduser(os.environ.get("YANTRA_STATE") or STATE_DEFAULT))
+# The Bash rule of the agent compares the text of the command with the full path of `yt`.
+# So the state path has only characters that a shell and a rule read as plain text.
+STATE_SAFE = re.compile(r"[\w@%+=:./-]+")
 AGENT_LIMIT_S = 45 * 60
 REVIEW_WAIT_S = 20 * 60
 FIX_ATTEMPTS = 2  # one budget for failed checks and for review findings
@@ -90,6 +91,9 @@ YT_TEMPLATE = """#!/bin/sh
 # Each Docker command mounts only the clone, read-only, with no network and no image download.
 set -eu
 clone=@CLONE@
+# The PATH of the runner, with full paths only. No command comes from the working directory.
+PATH=@PATH@
+export PATH
 
 usage() {
 	echo "usage: yt check | yt failures <n> | yt sqlite <file> | yt status | yt diff" >&2
@@ -149,6 +153,20 @@ case "${1:-} $#" in
 esac
 """
 TOKEN = re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
+
+
+def redact(text):
+    return TOKEN.sub("<token>", str(text))
+
+
+def say(text):
+    """Each text for stdout goes through here, so that no token is printed."""
+    print(redact(text))
+
+
+def warn(text):
+    """Each text for stderr goes through here, so that no token is printed."""
+    print(redact(text), file=sys.stderr)
 
 
 class NeedsHuman(Exception):
@@ -301,15 +319,6 @@ def join_pages(pages, key=None):
     return items
 
 
-def yt_calls(run_dir):
-    """The two texts that start a `yt` call. A Bash rule compares the text of the command.
-
-    The first one has no space for each run directory: the agent works in <run dir>/repo.
-    The second one is the full path, in quotes when it has a space.
-    """
-    return ["../bin/yt", shlex.quote(os.path.join(run_dir, "bin", "yt"))]
-
-
 def agent_command(prompt, clone, run_dir):
     """The command line of one headless agent. The flag names are from `claude --help`.
 
@@ -321,7 +330,10 @@ def agent_command(prompt, clone, run_dir):
         "Read(/%s/**)" % clone,
         "Read(/%s/input/**)" % run_dir,
         "Edit(/%s/**)" % clone,
-    ] + ["Bash(%s *)" % call for call in yt_calls(run_dir)]
+        # The full path only. A relative path depends on the working directory, and the
+        # agent can change that to a folder where it can write a file with this name.
+        "Bash(%s/bin/yt *)" % run_dir,
+    ]
     deny = ["Edit(/%s/.git/**)" % clone]
     return (
         ["claude", "-p", prompt, "--tools", AGENT_TOOLS, "--allowedTools"]
@@ -334,10 +346,12 @@ def agent_command(prompt, clone, run_dir):
     )
 
 
-def yt_script(clone):
-    """The text of the wrapper `yt` for one clone."""
+def yt_script(clone, path=None):
+    """The text of the wrapper `yt` for one clone. path is the PATH for docker and git."""
+    path = os.environ.get("PATH", "") if path is None else path
     words = {
         "@CLONE@": clone,
+        "@PATH@": ":".join(part for part in path.split(":") if part.startswith("/")),
         "@RUST@": RUST_IMAGE,
         "@PYTHON@": PYTHON_IMAGE,
         "@BUILD@": BUILD_SCRIPT,
@@ -351,14 +365,12 @@ def yt_script(clone):
 
 
 def run_text(run_dir):
-    short, full = yt_calls(run_dir)
     return (
         "# This run\n\n"
-        "Your working directory is the root of the clone. Do not change it.\n"
-        "Call `yt` from there, exactly in this form: `%s check`.\n"
-        "If that call is denied, use the full path, exactly in this form: `%s check`.\n"
-        "Use one `yt` command in each call.\n"
-        "The runner puts files for you in `%s/input/`. You can read them." % (short, full, run_dir)
+        "The clone is `%s/repo`.\n"
+        "Call `yt` with its full path, exactly in this form: `%s/bin/yt check`.\n"
+        "Each other form of the call is denied. Use one `yt` command in each call.\n"
+        "The runner puts files for you in `%s/input/`. You can read them." % (run_dir, run_dir, run_dir)
     )
 
 
@@ -489,8 +501,19 @@ def ensure_labels():
             raise RuntimeError("gh label create %s: %s" % (name, err.strip()[-300:]))
 
 
+def state_problem():
+    """None, or why the runner cannot use the state directory."""
+    if STATE_SAFE.fullmatch(STATE):
+        return None
+    return (
+        "the state directory `%s` has white space, a quote or a different special character. "
+        "The rule for the command of the agent cannot hold such a path. "
+        "Set YANTRA_STATE to a path with only letters, digits and `_ @ %% + = : . / -`" % STATE
+    )
+
+
 def preconditions():
-    problems = []
+    problems = [state_problem()] if state_problem() else []
     for name, cmd in (("gh", ["gh", "auth", "status"]), ("docker", ["docker", "info"]), ("claude", None)):
         if shutil.which(name) is None:
             problems.append("`%s` is not on PATH" % name)
@@ -504,19 +527,30 @@ def preconditions():
     return problems
 
 
+HOLDS_LOCK = False  # this process took the lock and did not release it
+
+
+def lock_owner():
+    """The pid in the lock, or None when there is no lock that can be read."""
+    try:
+        with open(os.path.join(STATE, "lock", "pid")) as f:
+            return int(f.read())
+    except (OSError, ValueError):
+        return None
+
+
 def take_lock():
     """One run at a time. Return True when this process holds the lock."""
+    global HOLDS_LOCK
     lock = os.path.join(STATE, "lock")
     os.makedirs(STATE, exist_ok=True)
     for _ in range(2):
         try:
             os.mkdir(lock)  # atomic
         except FileExistsError:
-            try:
-                with open(os.path.join(lock, "pid")) as f:
-                    pid = int(f.read())
-            except (OSError, ValueError):
-                print("yantra: the lock %s has no pid. Remove it by hand." % lock, file=sys.stderr)
+            pid = lock_owner()
+            if pid is None:
+                warn("yantra: the lock %s has no pid. Remove it by hand." % lock)
                 return False
             try:
                 os.kill(pid, 0)
@@ -531,12 +565,38 @@ def take_lock():
             continue
         with open(os.path.join(lock, "pid"), "w") as f:
             f.write(str(os.getpid()))
+        HOLDS_LOCK = True
         return True
     return False
 
 
 def drop_lock():
-    shutil.rmtree(os.path.join(STATE, "lock"), ignore_errors=True)
+    """Release the lock of this process, and no other lock. A lost state directory is not an error.
+
+    After a loss of the state directory, a later tick can hold a new lock. That lock stays.
+    """
+    global HOLDS_LOCK
+    HOLDS_LOCK = False
+    if lock_owner() == os.getpid():
+        shutil.rmtree(os.path.join(STATE, "lock"), ignore_errors=True)
+
+
+def restore_lock():
+    """After a loss of the state directory: put the lock of this process back.
+
+    Return a note for the log, or None when there is nothing to say.
+    """
+    if not HOLDS_LOCK or lock_owner() == os.getpid():
+        return None
+    try:
+        if take_lock():
+            return "the lock was lost with the state directory. The runner put it back."
+    except OSError as error:
+        return "the lock was lost with the state directory, and the runner could not put it back: %s" % error
+    return (
+        "the lock was lost with the state directory, and process %s holds a new lock. "
+        "The runner leaves that lock. Two runs can be active now." % lock_owner()
+    )
 
 
 def git_fence(clone):
@@ -575,7 +635,7 @@ class Run:
     def log(self, text):
         """Write one entry to run.log. It never raises: the log must not stop the handoff."""
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        line = "%s %s\n" % (stamp, TOKEN.sub("<token>", str(text).rstrip()))
+        line = "%s %s\n" % (stamp, redact(text).rstrip())
         try:
             try:
                 with open(self.logpath, "a", encoding="utf-8") as f:
@@ -584,6 +644,9 @@ class Run:
                 os.makedirs(self.dir, exist_ok=True)  # the run directory is gone: make it one time
                 with open(self.logpath, "a", encoding="utf-8") as f:
                     f.write(line)
+                note = restore_lock()  # the lock was in the same lost directory
+                if note:
+                    self.log(note)
         except Exception:
             try:
                 sys.stderr.write("yantra: run.log is not writable: " + line)
@@ -871,7 +934,7 @@ class Run:
         lines += ["- Pull request: %s" % (self.pr_url or "none"), "- Score: %s" % score]
         gone = "" if os.path.isdir(self.input) else " (it is gone or not complete)"
         lines += ["- Agent starts: %d" % self.starts, "- Run directory: `%s`%s" % (self.dir, gone)]
-        text = TOKEN.sub("<token>", "\n".join(lines))
+        text = redact("\n".join(lines))
         self.log("end state: %s. %s" % (label, note))
         number = self.number
         failed = []
@@ -890,20 +953,20 @@ class Run:
         else:
             where = "the removal of `agent-working` from issue #%d" % number
             self.final_write(where, lambda: remove_label(number, "agent-working"), failed)
-        print("yantra: ticket %d: %s. %s Log: %s" % (number, label, note, self.logpath))
+        say("yantra: ticket %d: %s. %s Log: %s" % (number, label, note, self.logpath))
         if failed:
             handoff = os.path.join(self.dir, "HANDOFF_FAILED")
             todo = "The run ended as `%s`, and these writes to GitHub did not work:\n" % label
             todo += "".join("- %s\n" % item for item in failed)
-            todo += "\nDo them by hand. The text of the comment:\n\n%s\n" % text
+            todo = redact(todo + "\nDo them by hand. The text of the comment:\n\n%s\n" % text)
             self.log("the handoff failed: %s" % "; ".join(failed))
-            print("yantra: ticket %d: writes to GitHub failed: %s" % (number, "; ".join(failed)), file=sys.stderr)
+            warn("yantra: ticket %d: writes to GitHub failed: %s" % (number, "; ".join(failed)))
             try:
                 with open(handoff, "w", encoding="utf-8") as f:
                     f.write(todo)
-                print("yantra: do them by hand. See %s" % handoff, file=sys.stderr)
+                warn("yantra: do them by hand. See %s" % handoff)
             except OSError as error:
-                print("yantra: %s is not writable (%s). Its text:\n%s" % (handoff, error, todo), file=sys.stderr)
+                warn("yantra: %s is not writable (%s). Its text:\n%s" % (handoff, error, todo))
             return 3
         return 0 if ready else 1
 
@@ -912,20 +975,20 @@ def run_ticket(number):
     """The lock must be held. Return the exit code."""
     problems = preconditions()
     if problems:
-        print("yantra: the run cannot start: " + "; ".join(problems), file=sys.stderr)
+        warn("yantra: the run cannot start: " + "; ".join(problems))
         return 2
     try:
         issue = read_issue(number)
         run = Run(issue)
         ensure_labels()
     except (RuntimeError, ValueError, KeyError, OSError) as error:
-        print("yantra: the run cannot start: %s" % error, file=sys.stderr)
+        warn("yantra: the run cannot start: %s" % error)
         return 2
     # A manual run and a tick change the labels in the same way.
     error = claim(number, "agent-go" in label_names(issue))
     if error:
         run.log("the run did not start: %s" % error)
-        print("yantra: the run cannot start: %s" % error, file=sys.stderr)
+        warn("yantra: the run cannot start: %s" % error)
         return 2
     # From here the issue has agent-working. Each way out ends in the handoff of finish.
     try:
@@ -934,7 +997,7 @@ def run_ticket(number):
         ready, note = False, str(stop)
     except Exception as error:  # fail closed: an error in the runner is a stop for a human, with the label
         trace = traceback.format_exc()
-        print("yantra: ticket %d: error in the runner:\n%s" % (number, trace), file=sys.stderr)
+        warn("yantra: ticket %d: error in the runner:\n%s" % (number, trace))
         run.log(trace)
         note = "Error in the runner: %s: %s. The run directory may be incomplete." % (type(error).__name__, error)
         ready = False
@@ -942,14 +1005,14 @@ def run_ticket(number):
         return run.finish(ready, note)
     except Exception:  # the handoff itself broke. Nothing more can be written, so stderr gets it.
         outcome = "ready" if ready else "needs a human"
-        print("yantra: ticket %d: the handoff failed. The issue can still have `agent-working`." % number, file=sys.stderr)
-        print("yantra: the outcome was: %s. %s\n%s" % (outcome, note, traceback.format_exc()), file=sys.stderr)
+        warn("yantra: ticket %d: the handoff failed. The issue can still have `agent-working`." % number)
+        warn("yantra: the outcome was: %s. %s\n%s" % (outcome, note, traceback.format_exc()))
         return 3
 
 
 def cmd_run(number):
     if not take_lock():
-        print("yantra: a different run holds the lock in %s" % STATE, file=sys.stderr)
+        warn("yantra: a different run holds the lock in %s" % STATE)
         return 2
     try:
         return run_ticket(number)
@@ -965,7 +1028,7 @@ def cmd_tick():
             query = ["--label", "agent-go", "--state", "open", "--limit", "200", "--json", "number"]
             listed = gh_json(["issue", "list", "-R", REPO] + query)
         except (RuntimeError, ValueError) as error:
-            print("yantra: tick cannot read the issues: %s" % error, file=sys.stderr)
+            warn("yantra: tick cannot read the issues: %s" % error)
             return 2
         if not listed:
             return 0
@@ -978,12 +1041,12 @@ def cmd_check_ticket(number):
     try:
         issue = read_issue(number)
     except (RuntimeError, ValueError) as error:
-        print("yantra: cannot read issue %d: %s" % (number, error), file=sys.stderr)
+        warn("yantra: cannot read issue %d: %s" % (number, error))
         return 2
     errors, criteria, scope = validate_ticket(issue)
     result = {"number": issue["number"], "title": issue["title"], "url": issue["url"]}
     result.update({"valid": not errors, "errors": errors, "criteria": criteria, "scope": scope})
-    print(json.dumps(result, indent=2))
+    say(json.dumps(result, indent=2))
     return 0 if not errors else 1
 
 
@@ -1004,6 +1067,10 @@ def main():
     args = parser.parse_args()
     # SIGTERM becomes an exit, so that the lock goes away and the agent does not stay behind.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(2))
+    if args.command != "check-ticket" and state_problem():
+        # before the lock: the runner makes no file in a state directory that it cannot use
+        warn("yantra: the run cannot start: " + state_problem())
+        return 2
     if args.command == "run":
         return cmd_run(args.issue)
     if args.command == "tick":
@@ -1012,4 +1079,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:  # no text leaves the runner without the token redaction
+        warn("yantra: error in the runner:\n" + traceback.format_exc())
+        sys.exit(2)
