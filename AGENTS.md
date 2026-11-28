@@ -56,10 +56,10 @@ docker run --rm --network none -v "$PWD":/src:ro rust:1.96.1 sh -c 'cp -r /src /
 
 ### 3. The test data is not yours to change
 
-- Scope: `tests/slt/**/*.test`, `tests/slt/SHA256SUMS`, `tests/slt.rs`, `ci/`, `.github/`, `yantra/`.
+- Scope: `tests/slt/**/*.test`, `tests/slt/SHA256SUMS`, `tests/slt.rs`, `ci/`, `.github/`, `yantra/`, `.claude/skills/unseen-check/`.
 - Rule: a ticket for the engine does not edit a test file, the checksum file or the harness. If the harness is wrong, that is a separate ticket.
 - Reason: the score is the one number that this project trusts. A change that raises the score by a change to the thing that measures it is worse than no change.
-- Check: `ci/guard.sh` compares the list of test files with the list in `tests/slt/SHA256SUMS`, path by path, and each file with its checksum. In a pull request it also fails when one change touches the code (`src/`, `Cargo.toml`, `Cargo.lock`, `server/`, `site/`) and the things that measure it (`tests/slt/` but not the baseline, `tests/slt.rs`, `.github/`, `ci/`, `yantra/`). A pull request that changes only the measuring side is not stopped by a check. A person reads those.
+- Check: `ci/guard.sh` compares the list of test files with the list in `tests/slt/SHA256SUMS`, path by path, and each file with its checksum. In a pull request it also fails when one change touches the code (`src/`, `Cargo.toml`, `Cargo.lock`, `server/`, `site/`) and the things that measure it (`tests/slt/` but not the baseline, `tests/slt.rs`, `.github/`, `ci/`, `yantra/`, `.claude/skills/unseen-check/`). A pull request that changes only the measuring side is not stopped by a check. A person reads those.
 
 ### 4. The baseline is the measured number
 
