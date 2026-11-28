@@ -97,7 +97,7 @@ The runner never merges.
 7. Open `informational` findings and `dismissed` findings are listed for the person. The runner does not fix them.
 
 A finding is open when its status is `pending`, `partial_implementation`, `not_implemented` or `focus_areas_edited`.
-A status or a level that the runner does not know is never read as clean.
+A status, a level or a record shape that the runner does not know is never read as clean.
 When Qodo skips a head commit that it judges trivial, the gate passes only after an earlier full review of the same pull request.
 
 The end states:

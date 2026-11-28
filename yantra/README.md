@@ -115,7 +115,9 @@ These cases need a human, with the reason in the comment:
 - a status or a level that is not in the lists above, or a finding with no title, status or level;
 - no review session in the record when the time limit ends;
 - a session for an older commit when the time limit ends. The comment gives the commit that Qodo reviewed and the head commit;
-- `review_complete` is not true in the record, on the first review. Qodo sets that for a change that it judges trivial.
+- `review_complete` is false in the record, on the first review. Qodo sets that for a change that it judges trivial;
+- `review_complete` is not there, or is not true or false;
+- a finding with a `location` or an `evidence` that is not an object, or with `citations` that are not a list of objects.
 
 `AGENTS.md` has the full gate under "Quality gate".
 
@@ -124,6 +126,8 @@ These cases need a human, with the reason in the comment:
 `python3 yantra/runner.py audit [--limit N]` reads the record of the last N merged pull requests.
 The default for N is 30.
 It prints JSON with each finding that is open or has the status `detected_after_merge`.
+The JSON also lists, as `no_full_review`, each pull request that Qodo did not review in full.
+Such a pull request has no findings, and that is not the same as clean.
 Qodo files `detected_after_merge` as closed, but it is a fault on the main branch that no pull request fixed.
 The command only reads.
 
@@ -168,7 +172,7 @@ The runner makes these labels when they are missing.
 | `needs-human` | issue, and pull request if there is one | the runner | The run stopped, and the comment on the issue gives the reason. |
 
 `ready-for-human` has one more case.
-Qodo does not review a change that it judges trivial, and then `review_complete` is not true in the record.
+Qodo does not review a change that it judges trivial, and then `review_complete` is false in the record.
 If that happens after the runner handled an earlier review of the same pull request, and no finding at the threshold is open, the pull request is ready, and the comment says so.
 If it happens on the first review, the run needs a human.
 

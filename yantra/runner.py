@@ -279,22 +279,62 @@ def parse_record(text):
     record = json.loads(text[start : end + 1], strict=False)
     if not isinstance(record, dict) or "review_session" not in record or not isinstance(record.get("findings"), list):
         raise ValueError("the record has no `review_session` or no list `findings`")
-    count = len(record["findings"])
-    if record.get("qar_operation_result_truncated") or record.get("finding_count", count) != count:
-        raise ValueError("the record does not have each finding")
+    count = record.get("finding_count")
+    if record.get("qar_operation_result_truncated") or type(count) is not int or count != len(record["findings"]):
+        raise ValueError("the record does not have each finding, or it has no `finding_count`")
     return record
 
 
 def review_of(record, sha):
     """Is Qodo's review of the commit sha in the record? Return (True, "") or (False, the reason)."""
     session = record["review_session"]
-    if not isinstance(session, dict):
+    if session is None:
         return False, "Qodo has no review of this pull request"
+    if not isinstance(session, dict):
+        return False, "the `review_session` of Qodo's record is not an object"
     if session.get("commit_sha") != sha:
         return False, "Qodo reviewed the commit %s, and the head is %s" % (session.get("commit_sha"), sha)
     if session.get("status") != "completed":
         return False, "the Qodo review of %s has the status `%s`" % (sha, session.get("status"))
     return True, ""
+
+
+def review_skipped(record):
+    """Did Qodo skip the commit of the session? It does that for a change that it judges trivial.
+
+    Only the JSON value false means skipped, and only true means a full review.
+    ValueError for a missing field and for each other value: the runner does not know what they mean.
+    """
+    session = record.get("review_session")
+    complete = session.get("review_complete") if isinstance(session, dict) else None
+    if complete is True:
+        return False
+    if complete is False:
+        return True
+    raise ValueError("`review_complete` of the review session is %r. The runner knows only true and false" % (complete,))
+
+
+def check_finding(finding):
+    """ValueError when a finding does not have the shape and the words that the runner knows.
+
+    This is the one place that checks a finding. Each later use, also the handoff comment, relies on it.
+    """
+    if not isinstance(finding, dict):
+        raise ValueError("a finding of Qodo is not an object")
+    for field in ("title", "attribution_status", "action_level"):
+        if not isinstance(finding.get(field), str):
+            raise ValueError("a finding of Qodo has no `%s`: %r" % (field, finding.get("title")))
+    title, status, level = finding["title"], finding["attribution_status"], finding["action_level"]
+    if status not in OPEN_STATUS + CLOSED_STATUS:
+        raise ValueError("the finding %r has the unknown attribution_status %r" % (title, status))
+    if level not in LEVELS:
+        raise ValueError("the finding %r has the unknown action_level %r" % (title, level))
+    for field in ("location", "evidence"):  # an object, or null, or not there
+        if not isinstance(finding.get(field), (dict, type(None))):
+            raise ValueError("the finding %r has a `%s` that is not an object" % (title, field))
+    cited = (finding.get("evidence") or {}).get("citations")
+    if cited is not None and not (isinstance(cited, list) and all(isinstance(item, dict) for item in cited)):
+        raise ValueError("the finding %r has `citations` that are not a list of objects" % title)
 
 
 def sort_findings(record):
@@ -306,16 +346,8 @@ def sort_findings(record):
     """
     blocking, flagged, dismissed, after_merge = [], [], [], []
     for finding in record["findings"]:
-        if not isinstance(finding, dict):
-            raise ValueError("a finding of Qodo is not an object")
-        for field in ("title", "attribution_status", "action_level"):
-            if not isinstance(finding.get(field), str):
-                raise ValueError("a finding of Qodo has no `%s`: %r" % (field, finding.get("title")))
+        check_finding(finding)
         status, level = finding["attribution_status"], finding["action_level"]
-        if status not in OPEN_STATUS + CLOSED_STATUS:
-            raise ValueError("the finding %r has the unknown attribution_status %r" % (finding["title"], status))
-        if level not in LEVELS:
-            raise ValueError("the finding %r has the unknown action_level %r" % (finding["title"], level))
         if status in OPEN_STATUS:
             (blocking if level in BLOCKING_LEVELS else flagged).append(finding)
         elif status == "dismissed":
@@ -326,7 +358,7 @@ def sort_findings(record):
 
 
 def place(finding):
-    """`file, lines a to b` of a finding, or `no location`."""
+    """`file, lines a to b` of a finding that passed check_finding, or `no location`."""
     location = finding.get("location") or {}
     if not location.get("file_path"):
         return "no location"
@@ -836,6 +868,7 @@ class Run:
                 if add_comment(self.pr, "/agentic_review")[0] != 0:
                     raise NeedsHuman("the review went wrong and the runner could not ask for it again")
             try:
+                skipped = review_skipped(record)
                 blocking, self.flagged, self.dismissed, _ = sort_findings(record)
             except ValueError as error:
                 raise NeedsHuman("the runner cannot read the Qodo review of %s: %s" % (sha, error))
@@ -851,16 +884,16 @@ class Run:
                 )
             if ci != "success":
                 raise NeedsHuman("CI of %s did not complete with success" % sha)
-            if record["review_session"].get("review_complete") is True:
+            if not skipped:
                 return "CI is green. The Qodo review of %s is complete, with no open finding at the threshold." % sha
             if handled:
                 return (
-                    "CI is green. Qodo did not review %s in full (`review_complete` is not true), "
+                    "CI is green. Qodo did not review %s in full (`review_complete` is false), "
                     "as it does for a change that it judges trivial. No finding at the threshold is open. "
                     "The runner handled %d earlier Qodo review(s) of this pull request with findings." % (sha, handled)
                 )
             raise NeedsHuman(
-                "Qodo did not review %s in full (`review_complete` is not true), "
+                "Qodo did not review %s in full (`review_complete` is false), "
                 "and there is no earlier review of this pull request" % sha
             )
 
@@ -1038,7 +1071,7 @@ class Run:
                     key = went_wrong(comments, seen)
                     if key:
                         return None, key, ci
-            except (RuntimeError, ValueError, KeyError, TypeError) as error:
+            except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as error:
                 state = "the poll failed: %s" % error  # not an answer. The loop asks again until the time limit.
             self.log("wait for the review of %s: %s" % (sha, state))
             if time.time() > deadline:
@@ -1214,16 +1247,29 @@ def cmd_audit(limit):
     except (RuntimeError, ValueError) as error:
         warn("yantra: audit cannot read the pull requests: %s" % error)
         return 2
-    found, no_review, unreadable = [], [], []
+    found, no_full_review, unreadable = [], [], []
     for pr in merged:
+        number = pr.get("number") if isinstance(pr, dict) else None
         try:
             record = read_record(pr["url"])
-            if record["review_session"] is None:
-                no_review.append(pr["number"])
+            session = record["review_session"]
+            # A pull request with no full review has no findings. That is not the same as clean.
+            reason = None
+            if session is None:
+                reason = "no review session"
+            elif not isinstance(session, dict):
+                raise ValueError("the `review_session` of the record is not an object")
+            elif session.get("status") != "completed":
+                reason = "the review session has the status %r" % (session.get("status"),)
+            elif review_skipped(record):
+                reason = "`review_complete` is false"
+            if reason:
+                no_full_review.append({"pr": number, "reason": reason})
             found += audit_findings(pr, record)
-        except (RuntimeError, ValueError, KeyError, TypeError) as error:
-            unreadable.append({"pr": pr.get("number"), "reason": str(error)})
-    result = {"pull_requests": len(merged), "findings": found, "no_review": no_review, "unreadable": unreadable}
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as error:
+            unreadable.append({"pr": number, "reason": str(error)})
+    result = {"pull_requests": len(merged), "findings": found}
+    result.update({"no_full_review": no_full_review, "unreadable": unreadable})
     say(json.dumps(result, indent=2))
     if unreadable:
         return 2

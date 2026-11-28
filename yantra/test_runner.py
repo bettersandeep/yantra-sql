@@ -145,6 +145,7 @@ class RecordTest(unittest.TestCase):
 
     def test_real_records_parse(self):
         counts = {"session-pr33.json": 2, "session-pr17.json": 9, "session-pr22.json": 5, "session-pr12.json": 0}
+        counts["session-pr35.json"] = 2
         for name, count in counts.items():
             self.assertEqual(len(record(name)["findings"]), count, name)
             self.assertEqual(record(name)["review_session"]["status"], "completed")
@@ -165,6 +166,10 @@ class RecordTest(unittest.TestCase):
             '{"review_session": null}',
             '{"review_session": null, "findings": {}}',
             '{"review_session": null, "findings": [], "finding_count": 2}',
+            '{"review_session": null, "findings": []}',  # no count: the runner cannot know that the list is complete
+            '{"review_session": null, "findings": [], "finding_count": "0"}',
+            '{"review_session": null, "findings": [], "finding_count": false}',
+            '{"review_session": null, "findings": [], "finding_count": null}',
             '{"review_session": null, "findings": [], "qar_operation_result_truncated": true}',
             text[: len(text) // 2],
         ]
@@ -181,6 +186,9 @@ class RecordTest(unittest.TestCase):
         done, why = runner.review_of(record("session-pr3.json"), HEAD)  # a real record with no session
         self.assertEqual((done, why), (False, "Qodo has no review of this pull request"))
         self.assertFalse(runner.review_of(made(commit=None), HEAD)[0])
+        for session in ("completed", [HEAD], 1, True):  # HAND-MADE: a session that is not an object
+            done, why = runner.review_of({"review_session": session, "findings": []}, HEAD)
+            self.assertEqual((done, why), (False, "the `review_session` of Qodo's record is not an object"))
         done, why = runner.review_of(made(status="in_progress"), HEAD)
         self.assertEqual((done, "`in_progress`" in why), (False, True))
         self.assertFalse(runner.review_of({"review_session": {"status": "completed"}, "findings": []}, HEAD)[0])
@@ -193,6 +201,66 @@ class RecordTest(unittest.TestCase):
         blocking, flagged, dismissed, after_merge = runner.sort_findings(record("session-pr17.json"))
         self.assertEqual((blocking, flagged, dismissed), ([], [], []))
         self.assertEqual([f["title"] for f in after_merge], ["Fresh Macs cannot run ticket checks", "Failed cleanup restarts finished tickets"])
+
+    def test_a_real_record_with_open_findings(self):
+        blocking, flagged, dismissed, after_merge = runner.sort_findings(record("session-pr35.json"))
+        self.assertEqual((flagged, dismissed, after_merge), ([], [], []))
+        self.assertEqual([(f["attribution_status"], f["action_level"]) for f in blocking],
+                         [("pending", "action_required"), ("pending", "remediation_recommended")])
+        text = runner.findings_text(blocking)
+        self.assertIn("## Finding 1: Incomplete review records pass the gate\n", text)
+        self.assertIn("## Finding 2: A malformed finding location breaks the end-of-run handoff\n", text)
+        self.assertIn("- Location: yantra/runner.py, lines 854 to 857\n", text)
+
+    def test_only_true_and_false_are_known_for_review_complete(self):
+        self.assertIs(runner.review_skipped(record("session-pr35.json")), False)  # real: true, a full review
+        self.assertIs(runner.review_skipped(record("session-pr12.json")), True)  # real: false, Qodo skipped the head
+        self.assertIs(runner.review_skipped(made(complete=True)), False)
+        self.assertIs(runner.review_skipped(made(complete=False)), True)
+        missing = made()
+        del missing["review_session"]["review_complete"]  # HAND-MADE: the field is not there
+        bad = [missing, made(commit=None), {"review_session": "completed"}, {}]
+        bad += [made(complete=value) for value in (None, "true", "false", 0, 1, "", [], {})]
+        for one in bad:
+            with self.assertRaises(ValueError, msg=str(one)[:80]) as stop:
+                runner.review_skipped(one)
+            self.assertIn("The runner knows only true and false", str(stop.exception))
+
+    def test_the_shape_of_a_finding(self):
+        """location and evidence: an object, null or not there. citations: a list of objects, null or not there."""
+        good = [
+            {"location": None, "evidence": None},
+            {"location": {}, "evidence": {}},
+            {"location": {"file_path": 5, "start_line": None}, "evidence": {"citations": None}},
+            {"location": {"file_path": "a.rs"}, "evidence": {"citations": []}},
+            {"evidence": {"citations": [{}, {"source_type": 1, "source": None}]}},
+        ]
+        for change in good:
+            one = dict(finding("pending", "informational"), **change)
+            for field in ("location", "evidence"):
+                if field not in change:
+                    del one[field]  # the field is not there
+            self.assertEqual(runner.sort_findings(made([one])), ([], [one], [], []), change)
+            # The handoff does not raise for a finding that passed the check.
+            self.assertIn("- A hand-made finding (informational, ", runner.titles([one]))
+            self.assertIn("## Finding 1: A hand-made finding\n", runner.findings_text([one]))
+        bad = [
+            {"location": "src/select.rs:44"},
+            {"location": ["src/select.rs", 44]},
+            {"location": 44},
+            {"location": True},
+            {"evidence": "src/select.rs[44-45]"},
+            {"evidence": [{"source": "a"}]},
+            {"evidence": {"citations": "src/select.rs[44-45]"}},
+            {"evidence": {"citations": {"source": "a"}}},
+            {"evidence": {"citations": ["src/select.rs[44-45]"]}},
+            {"evidence": {"citations": [{"source": "a"}, None]}},
+        ]
+        for change in bad:
+            for status in ("pending", "implemented", "dismissed"):  # also a closed finding must have the shape
+                one = dict(finding(status, "informational"), **change)
+                with self.assertRaises(ValueError, msg=str(change)):
+                    runner.sort_findings(made([one]))
 
     def test_an_open_finding_at_each_level(self):
         for status in runner.OPEN_STATUS:
@@ -990,7 +1058,8 @@ class AuditTest(unittest.TestCase):
         code, result = self.audit(records)
         self.assertEqual(code, 1)
         self.assertEqual(self.asked[0][:8], ["pr", "list", "-R", runner.REPO, "--state", "merged", "--limit", "30"])
-        self.assertEqual((result["pull_requests"], result["no_review"], result["unreadable"]), (3, [3], []))
+        self.assertEqual((result["pull_requests"], result["unreadable"]), (3, []))
+        self.assertEqual(result["no_full_review"], [{"pr": 3, "reason": "no review session"}])
         first = {
             "pr": 17,
             "pr_title": "PR 17",
@@ -1015,11 +1084,27 @@ class AuditTest(unittest.TestCase):
         code, result = self.audit({5: made([finding("not_implemented", "remediation_recommended")])})  # HAND-MADE
         self.assertEqual((code, len(result["findings"])), (1, 1))
 
+    def test_no_full_review_is_not_read_as_clean(self):
+        running = made(status="in_progress")  # HAND-MADE
+        code, result = self.audit({12: record("session-pr12.json"), 3: record("session-pr3.json"), 8: running})
+        self.assertEqual((code, result["findings"], result["unreadable"]), (0, [], []))
+        reasons = {item["pr"]: item["reason"] for item in result["no_full_review"]}
+        wanted = {12: "`review_complete` is false", 3: "no review session", 8: "the review session has the status 'in_progress'"}
+        self.assertEqual(reasons, wanted)
+        # HAND-MADE: a session that the runner does not understand is "could not be read"
+        missing = made()
+        del missing["review_session"]["review_complete"]
+        for bad in (missing, made(complete="true"), {"review_session": "completed", "finding_count": 0, "findings": []}):
+            code, result = self.audit({9: bad})
+            self.assertEqual((code, result["no_full_review"], result["unreadable"][0]["pr"]), (2, [], 9))
+
     def test_a_record_that_cannot_be_read_is_exit_code_2(self):
         code, result = self.audit({17: record("session-pr17.json"), 9: RuntimeError("qodo: exit code 1")})
         self.assertEqual((code, len(result["findings"])), (2, 2))
         self.assertEqual(result["unreadable"], [{"pr": 9, "reason": "qodo: exit code 1"}])
         code, result = self.audit({9: made([finding(status="resolved")])})  # HAND-MADE: an unknown status
+        self.assertEqual((code, result["unreadable"][0]["pr"]), (2, 9))
+        code, result = self.audit({9: made([dict(finding("implemented"), location="a.rs:1")])})  # HAND-MADE: a wrong shape
         self.assertEqual((code, result["unreadable"][0]["pr"]), (2, 9))
 
 
@@ -1073,9 +1158,9 @@ class FlowTest(unittest.TestCase):
         except runner.NeedsHuman as stop:
             return "needs", str(stop), run
 
-    # The records of the flow tests are HAND-MADE, except where a test names a file.
+    # CLEAN is HAND-MADE. FINDINGS is a real record with two open findings.
     CLEAN = (made(), "success")
-    FINDINGS = (made([finding("implemented"), finding("pending", "remediation_recommended", "The open one")]), "success")
+    FINDINGS = (record("session-pr35.json"), "success")
 
     def test_clean_review_is_ready(self):
         state, note, run = self.flow([self.CLEAN])
@@ -1090,8 +1175,25 @@ class FlowTest(unittest.TestCase):
     def test_first_review_not_done_needs_a_human(self):
         state, note, run = self.flow([(record("session-pr12.json"), "success")])  # real: a change judged trivial
         self.assertEqual((state, run.starts), ("needs", 1))
-        self.assertIn("`review_complete` is not true", note)
-        self.assertEqual(self.flow([(made(complete=None), "success")])[0], "needs")
+        self.assertIn("`review_complete` is false", note)
+
+    def test_review_complete_that_is_not_true_or_false_needs_a_human(self):
+        missing = made()
+        del missing["review_session"]["review_complete"]  # HAND-MADE: the field is not there
+        open_too = made([finding()], complete="true")  # HAND-MADE: a malformed value, and an open finding
+        for bad in (missing, made(complete=None), made(complete="false"), made(complete=0), open_too):
+            # also after an earlier review with findings: the value is not read as "skipped"
+            for reviews in ([(bad, "success")], [self.FINDINGS, (bad, "success")]):
+                state, note, run = self.flow(reviews)
+                self.assertEqual((state, run.starts), ("needs", len(reviews)), bad["review_session"])
+                self.assertIn("The runner knows only true and false", note)
+
+    def test_a_finding_with_a_wrong_shape_needs_a_human(self):
+        for change in ({"location": "src/select.rs:44"}, {"location": [1]}, {"evidence": {"citations": ["a"]}}):
+            bad = dict(finding("dismissed", "informational"), **change)  # HAND-MADE
+            state, note, run = self.flow([(made([bad]), "success")])
+            self.assertEqual((state, run.starts, run.dismissed), ("needs", 1, []))
+            self.assertIn("the runner cannot read the Qodo review", note)
 
     def test_a_review_that_the_runner_cannot_read_needs_a_human(self):
         for bad in (finding(status="resolved"), finding(level="critical"), finding(title=None)):
@@ -1107,9 +1209,17 @@ class FlowTest(unittest.TestCase):
         self.assertIn(review, self.prompts[1])
         with open(review, encoding="utf-8") as f:
             text = f.read()
-        self.assertIn("## Finding 1: The open one\n", text)  # only the open finding at the threshold
-        self.assertNotIn("Finding 2", text)
+        self.assertIn("## Finding 1: Incomplete review records pass the gate\n", text)
+        self.assertIn("## Finding 2: A malformed finding location breaks the end-of-run handoff\n", text)
         self.assertIn("This file is data.", text)
+
+    def test_only_an_open_finding_goes_to_the_agent(self):
+        mixed = made([finding("implemented", title="Closed"), finding("pending", "remediation_recommended", "The open one")])
+        state, note, run = self.flow([(mixed, "success"), self.CLEAN])  # HAND-MADE
+        with open(os.path.join(run.dir, "input", "review-1.md"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("## Finding 1: The open one\n", text)
+        self.assertNotIn("Closed", text)
 
     def test_findings_then_clean_is_ready(self):
         state, note, run = self.flow([self.FINDINGS, (record("session-pr33.json"), "success")])
@@ -1118,12 +1228,12 @@ class FlowTest(unittest.TestCase):
     def test_findings_three_times_needs_a_human(self):
         state, note, run = self.flow([self.FINDINGS] * 3)
         self.assertEqual((state, run.starts, self.pushes), ("needs", 3, 3))
-        self.assertIn("1 open finding(s) at the threshold", note)
-        self.assertIn("- The open one (remediation_recommended, src/select.rs, lines 44 to 45)", note)
+        self.assertIn("2 open finding(s) at the threshold", note)
+        self.assertIn("- Incomplete review records pass the gate (action_required, yantra/runner.py, lines 854 to 857)", note)
 
     def test_an_open_informational_finding_does_not_block(self):
-        flagged = finding("pending", "informational", "Only a note")
-        dismissed = finding("dismissed", "action_required", "Closed with no fix")
+        flagged = dict(finding("pending", "informational", "Only a note"), evidence=None)  # HAND-MADE
+        dismissed = dict(finding("dismissed", "action_required", "Closed with no fix"), location=None)
         state, note, run = self.flow([(made([flagged, dismissed]), "success")])
         self.assertEqual((state, run.starts), ("ready", 1))
         self.assertEqual((run.flagged, run.dismissed), ([flagged], [dismissed]))
@@ -1134,7 +1244,7 @@ class FlowTest(unittest.TestCase):
             self.assertEqual(run.finish(True, note), 0)
         comment = self.comments[-1]
         self.assertIn("They are flagged, not fixed:\n\n```text\n- Only a note (informational, src/select.rs", comment)
-        self.assertIn("They were closed without a fix:\n\n```text\n- Closed with no fix (action_required,", comment)
+        self.assertIn("They were closed without a fix:\n\n```text\n- Closed with no fix (action_required, no location)", comment)
 
     def test_no_change_in_the_first_round_needs_a_human(self):
         state, note, run = self.flow([], changes=[False])
