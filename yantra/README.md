@@ -45,8 +45,9 @@ It changes nothing.
 
 `python3 yantra/runner.py run <N>` does these steps for issue `<N>`.
 
-1. It checks that `gh` is logged in, that Docker runs and that `claude` is on the PATH.
+1. It checks that `gh` is logged in, that Docker runs, that the two Docker images of the checks are on the machine, and that `claude` is on the PATH.
    If not, it exits with code 2 and writes nothing to GitHub.
+   For a tick, the issue keeps `agent-go`.
 2. It reads the issue.
    It puts the label `agent-working` on the issue, and then takes `agent-go` off.
    Then it validates the ticket.
@@ -131,6 +132,12 @@ At the end, the runner tries each write to GitHub 3 times.
 It removes `agent-go` in each case.
 It removes `agent-working` last, and only when the comment and the end label are there.
 If a write still fails, the run directory gets the file `HANDOFF_FAILED` with the writes that a person must do, and the exit code is 3.
+If that file cannot be written, its text goes to stderr, which is `tick.log` for a tick.
+
+The handoff does not need the run directory.
+The log never stops a run: when `run.log` cannot be written, the line goes to stderr.
+When the run directory is gone during the wait for the review, the wait goes on, because it needs only GitHub.
+An error in the runner after the label change ends as `needs-human`, with the error in the comment.
 
 Exit codes of `run` and `tick`:
 
@@ -162,6 +169,9 @@ If there is no such issue, it exits and prints nothing.
 One ticket runs at a time.
 The lock is the directory `lock` in the state directory, with the pid inside.
 A lock with a dead pid is taken over.
+A run releases only the lock that has its own pid.
+When the state directory is lost during a run, the run puts its lock back with the next log line.
+If a later tick took a new lock before that, the run leaves that lock and writes this to its log.
 
 To start a ticket, put the label `agent-go` on it.
 
@@ -180,10 +190,21 @@ A new run needs the remote branch `ticket-<N>` to be gone.
 launchd runs `runner.py` from this checkout, with the branch that is checked out here.
 The agent gets `yantra/brief.md` from the new clone, which is `origin/main`.
 
+## Update
+
+After each update of this checkout, run `sh yantra/install.sh` again.
+The installed plist holds the state path of the time of the install, and gives it to the runner as `YANTRA_STATE`.
+So an old install keeps its old state directory until you install again.
+`install.sh` prints the state path that it wrote into the plist.
+Run directories of the old state directory stay there.
+
 ## Logs
 
-The state directory is `~/Library/Caches/yantra`.
+The state directory is `~/.local/state/yantra`.
 The variable `YANTRA_STATE` changes it.
+Do not put the state in a cache folder, because a cleanup tool can empty that while a run waits for the review.
+The path can have only letters, digits and `_ @ % + = : . / -`.
+With white space, a quote or a different special character in the real path, the runner does not start: it exits with code 2 and writes nothing to GitHub.
 
 - `tick.log`: the output of each tick from launchd.
 - `runs/ticket-<N>-<UTC time>/run.log`: each command of one run, with its exit code and output, and UTC times.
@@ -204,6 +225,9 @@ The agent can:
 - run one command, `yt`, with the tool Bash.
 
 `yt` is a script that the runner writes to `bin/yt` in the run directory, outside the clone.
+The agent calls it with its full path, and only that text is allowed.
+A Bash rule compares the text of the command, so a call with a relative path is denied: the agent could change its working directory to a folder where it can write a file with that name.
+`yt` does not depend on the working directory or on the PATH of the agent: the path of the clone and the PATH for `docker` and `git` are fixed in the script.
 It builds each Docker command itself: only the clone is mounted, read-only, with `--network none --pull never`.
 
 | Command | What it does |

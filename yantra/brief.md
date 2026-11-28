@@ -27,8 +27,9 @@ The paths of this run and the ticket are below this brief.
 - You can read files in the clone, and in the input directory of the run.
 - You can edit and write files in the clone, but not in `.git/`.
 - You have one command, `yt`.
-  The part "This run" below gives its full path.
-  Call it with the full path, and with one `yt` command in each call.
+  The part "This run" below gives the exact text that starts a call.
+  It is the full path of `yt`.
+  Use that text, and one `yt` command in each call.
 - You have no other command.
   There is no `git`, no `docker`, no `cargo`, no `ls`, no `cat` and no network.
   A call of one of them is denied.
