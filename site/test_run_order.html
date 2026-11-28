@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Test: the order of the runs</title>
+<!--
+A test of run() in site.js: an older run that ends late does not replace the answer of a newer run.
+This file is not a part of the published site. README.md says how to run it.
+-->
+<p id="verdict">RUNNING</p>
+<iframe id="page" src="dist/index.html" title="The page under test"></iframe>
+<script>
+const frame = document.getElementById("page");
+frame.addEventListener("load", async () => {
+  const page = frame.contentWindow;
+  const real = page.execute;
+  // Each run now waits until the test gives it an answer.
+  const answers = [];
+  page.execute = () => new Promise((resolve) => answers.push(resolve));
+  page.run();
+  page.run();
+  answers[1]({ ok: true, rows: [["newer"]] });
+  answers[0]({ ok: true, rows: [["older"]] });
+  // The run that the page starts on load is older too. Wait until the engine is there and that run ends.
+  await real("SELECT 1");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const shown = frame.contentDocument.getElementById("result").textContent;
+  document.getElementById("verdict").textContent =
+    shown === "newer" ? "PASS" : `FAIL: the page shows "${shown}", not "newer"`;
+});
+</script>
+</html>

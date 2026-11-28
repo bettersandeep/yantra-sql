@@ -7,6 +7,7 @@ const compiled = fetch("lekha.wasm")
   .then((response) => response.arrayBuffer())
   .then((bytes) => WebAssembly.compile(bytes));
 let engine = null;
+let newest = 0; // The number of the newest run.
 
 // Returns { ok: true, rows } or { ok: false, error }.
 async function execute(text) {
@@ -39,7 +40,10 @@ async function execute(text) {
 
 // Shows the answer. Each text goes in as text, never as HTML.
 async function run() {
+  const number = ++newest;
   const answer = await execute(sql.value);
+  // An older run that ends late does not replace the answer of a newer run.
+  if (number !== newest) return;
   if (!answer.ok) {
     const error = document.createElement("p");
     error.className = "error";
@@ -74,7 +78,10 @@ for (const button of document.querySelectorAll(".examples button")) {
 }
 
 fetch("score.json")
-  .then((response) => response.json())
+  .then((response) => {
+    if (!response.ok) throw new Error(`score.json: HTTP ${response.status}`);
+    return response.json();
+  })
   .then((score) => {
     const count = (n) => n.toLocaleString("en-US");
     const percent = ((100 * score.passed) / score.applicable).toFixed(1);
@@ -88,6 +95,10 @@ fetch("score.json")
         commit,
         ".",
       );
+  })
+  .catch((error) => {
+    console.error(error);
+    document.getElementById("score").textContent = "The score did not load.";
   });
 
 // On load, the page runs the SQL in the box.

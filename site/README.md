@@ -9,6 +9,7 @@ The workflow `.github/workflows/pages.yml` builds the site and publishes it with
 - `make_map.py`: draws the score map.
   Python 3, standard library only.
 - `test_make_map.py`: the test of `make_map.py`.
+- `test_run_order.html`: the test of the order of the runs on the page.
 - `wasm/`: a separate crate that compiles the engine to WebAssembly.
 - `index.html`, `site.css`, `site.js`: the page.
 - `build.sh`: builds the folder `dist/`, which is ready to publish.
@@ -52,6 +53,7 @@ The `unsafe` code for the shared memory is only in `wasm/src/lib.rs`.
 Each value is a string, so a large integer keeps each digit, and NULL is `null`.
 A panic of the engine is a trap in WebAssembly.
 `site.js` catches the trap, shows an error, and makes a new instance for the next run.
+Each run has a number, and the page shows an answer only when it is the answer of the newest run.
 
 ## Build
 
@@ -86,12 +88,24 @@ python3 -m unittest discover -s site -p 'test_*.py'
 docker run --rm --network none -v "$PWD":/src:ro yantra-rust:1.96.1 sh -c 'cp -r /src /tmp/w && cd /tmp/w/site/wasm && cargo fmt --check && cargo clippy --locked --offline --all-targets -- -D warnings && cargo test --locked --offline'
 ```
 
+`ci.yml` runs the two commands above on each pull request, without Docker.
+It does not build `wasm/` for the wasm target, and it does not open the page.
+The `pages` workflow does the wasm build after the merge.
+
 The page has a test hook.
 Each `?q=<sql>` in the address runs on load, in order.
 For example, `http://127.0.0.1:8000/?q=SELECT%201%20%2F%200` shows `NULL`.
 
-`ci.yml` does not build `wasm/`.
-A change of the engine API that breaks `wasm/` shows as a failed `pages` workflow after the merge.
+`test_run_order.html` tests that an older run that ends late does not replace the answer of a newer run.
+It needs `site/dist`, and no workflow runs it.
+Start a server for the folder `site`, not for `site/dist`:
+
+```
+python3 -m http.server 8000 --bind 127.0.0.1 --directory site
+```
+
+Then open `http://127.0.0.1:8000/test_run_order.html`.
+It shows `PASS` or `FAIL` with the reason.
 
 ## GitHub Pages
 
