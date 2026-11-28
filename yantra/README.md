@@ -45,7 +45,7 @@ It changes nothing.
 
 `python3 yantra/runner.py run <N>` does these steps for issue `<N>`.
 
-1. It checks that `gh` and `qodo` are logged in, that Docker runs, that the two Docker images of the checks are on the machine, and that `claude` is on the PATH.
+1. It checks that `gh` and `qodo` are logged in, that Docker runs, that the three Docker images of the checks are on the machine, and that `claude` is on the PATH.
    If not, it exits with code 2 and writes nothing to GitHub.
    For a tick, the issue keeps `agent-go`.
 2. It reads the issue.
@@ -67,9 +67,10 @@ It changes nothing.
 7. It runs its own checks.
    Each changed path is inside the scope.
    The guard of `origin/main` passes.
-   Format, clippy and the tests pass in Docker with no network.
+   The four build checks pass in Docker with no network.
+   The section "The build checks" below lists them.
    The score is not lower than the old score.
-8. If a check fails, it starts the agent again with the output of the check in a file.
+8. If a check fails, it starts the agent again with the name of the check, and with the output of the check in a file.
    Then steps 6 and 7 run again.
 9. It pushes the branch and opens the pull request.
    The body has `Closes #<N>`, the criteria as a task list that is not ticked, the score, and the report of the agent as plain text.
@@ -92,6 +93,31 @@ Each later one has `Ticket #<N>: fixes after checks or review, round <k>`.
 The runner fails closed.
 When a step cannot read or understand its input, the run stops as "needs a human" with the reason.
 "Could not check" is never "passed".
+
+## The build checks
+
+`yt check` of the agent and the runner's own check before the push run the same list, in this order.
+The list is `CHECKS` in `runner.py`.
+
+| Name of the check | Image | What it runs |
+|---|---|---|
+| `build of the engine crate` | `yantra-rust:1.96.1` | `cargo fmt --check`, `cargo clippy --locked --offline --all-targets -- -D warnings`, `cargo test --locked --offline -- --nocapture` |
+| `build of the crate server/` | `yantra-rust:1.96.1` | The same three commands, each with `--manifest-path server/Cargo.toml`. The test command has no `-- --nocapture`. |
+| `build of the crate site/wasm/` | `yantra-rust:1.96.1` | The same three commands, each with `--manifest-path site/wasm/Cargo.toml`. The test command has no `-- --nocapture`. |
+| `tests of the site (Python tests of site/)` | `python:3.13-slim` | `python3 -m unittest discover -s site -p 'test_*.py'` |
+
+- Each check runs in a container of its own, with `--network none --pull never` and the clone mounted read-only.
+  It copies the clone to `/tmp/w` first and works there.
+- The first check that fails stops the list. The checks after it do not run.
+- In the runner, the name of the failed check is the name in the table.
+  The prompt of the fix round has that name, and the first line of the file with the output has it too.
+- In `yt check`, the last line on stderr is `yt check: FAILED: <name> (exit code <n>). The checks after it did not run.`
+- Exit code 125 is from Docker itself, for example for an image that is not there.
+  Then the run needs a human, and `yt check` says that Docker could not start the check.
+- The score comes from the `slt:` lines of the engine crate only.
+  The runner compares it after the four checks passed.
+- The commands are in `runner.py` and in `bin/yt` of the run directory, so a candidate cannot change them.
+- The tests of the runner itself (`yantra/test_runner.py`) are not in the list. CI runs them.
 
 ## The local review
 
@@ -196,8 +222,9 @@ The candidate must not change the checks that check it.
 - The guard is `ci/guard.sh` of `origin/main`.
   The runner mounts it over the guard of the candidate.
   So a candidate with a changed guard is checked by the guard of the base.
-- The build check executes the candidate by design: `cargo fmt`, `cargo clippy` and `cargo test` run its code, its tests, `tests/slt.rs` and its cargo and toolchain files.
-  That happens in a container with no network and with the clone mounted read-only.
+- The build checks execute the candidate by design: `cargo fmt`, `cargo clippy` and `cargo test` run its code, its tests, `tests/slt.rs` and its cargo and toolchain files, for the engine crate, `server/` and `site/wasm/`.
+  The Python tests of `site/` run the Python files of the candidate.
+  That happens in containers with no network and with the clone mounted read-only.
   The scope check runs before it, so each of those files is the file of `origin/main` unless the Scope of the ticket names it.
 - `runner.py` and `yt` are not in the clone.
   `brief.md` is read from the clone before the first agent starts.
@@ -253,10 +280,10 @@ docker pull golang:1.23
 docker pull python:3.13-slim
 ```
 
-`yantra-rust:1.96.1` runs the build checks.
+`yantra-rust:1.96.1` runs the build checks of the three crates.
 `golang:1.23` runs the guard, because it has git and sha256sum.
-`python:3.13-slim` is for `yt sqlite`.
-A run does not start when the first or the second image is missing.
+`python:3.13-slim` runs the Python tests of `site/`, and it is for `yt sqlite`.
+A run does not start when one of the three images is missing.
 A cleanup of unused Docker images removes them, and then they must be made again.
 
 ## Start and stop
@@ -344,7 +371,7 @@ It builds each Docker command itself: only the clone is mounted, read-only, with
 
 | Command | What it does |
 |---|---|
-| `yt check` | The build check of the runner: format, clippy and the tests. |
+| `yt check` | The build checks of the runner: format, clippy and the tests of the engine crate, of `server/` and of `site/wasm/`, and the Python tests of `site/`. See "The build checks". |
 | `yt failures <n>` | The first `<n>` failing test records. `<n>` must be digits. |
 | `yt sqlite <file>` | Runs each line of `<file>` as one statement in the real SQLite, in one in-memory database. `<file>` must be a regular file inside the clone. |
 | `yt status` | `git status --porcelain` of the clone. |
@@ -379,7 +406,7 @@ Limits that you must know:
 - The fence is the permission rules of Claude Code and the script `yt`.
   It is not a virtual machine.
   The agent process is a process of the user of the Mac.
-- The code of the candidate runs in the containers of `yt check` and of the runner's build check.
+- The code of the candidate runs in the containers of `yt check` and of the runner's build checks.
   The containers have no network and see only the clone, read-only.
 - `.yt/` in the clone is the scratch directory of the agent.
   git does not see it, so the runner does not commit it.
