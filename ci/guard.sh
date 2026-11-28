@@ -32,11 +32,13 @@ fi
 #    from the measure side into src/ is seen on both sides.
 #    yantra/ is on the measure side: the runner and the brief of the agents
 #    check the engine, so the engine does not change with them.
+#    .claude/skills/unseen-check/ is there too: it is the check on test
+#    files that the agents never see.
 if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request_target ]; then
 	changed=$(git -c core.quotePath=false diff --no-renames --name-only "origin/${GITHUB_BASE_REF}...HEAD")
 	# The code that CI checks: the engine, the server, and the site with its wasm glue.
 	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$|server/|site/)' || true)
-	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/)' | grep -v '^tests/slt/baseline\.txt$' || true)
+	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/|\.claude/skills/unseen-check/)' | grep -v '^tests/slt/baseline\.txt$' || true)
 	if [ -n "$engine" ] && [ -n "$measure" ]; then
 		echo "guard: this pull request changes the engine and the things that measure it" >&2
 		printf 'engine:\n%s\nmeasure:\n%s\n' "$engine" "$measure" >&2

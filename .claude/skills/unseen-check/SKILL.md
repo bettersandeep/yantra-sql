@@ -21,7 +21,7 @@ So the result that counts is the number of wrong values, and it must be 0.
 ## Rules
 
 - Never copy the unseen files, their queries or their expected results into the lekha directory, a ticket, a pull request, a commit message or a prompt for a coding agent. If the agents see them, the check has no value.
-- When you report failures, give counts and the name of the missing feature. Do not quote the queries.
+- Never open an output file of the script. When you report failures, give counts only.
 - Do not change `unseen.sh` or `SHA256SUMS` to make a run pass.
 
 ## Steps
@@ -33,10 +33,10 @@ So the result that counts is the number of wrong values, and it must be 0.
    sh .claude/skills/unseen-check/unseen.sh <dir>
    ```
 
-   It takes 1 to 3 minutes. The container has no network, and it works on a copy.
+   It takes 1 to 3 minutes. The container has no network, and it works on a copy. It runs the tests two times: one time to measure, and one time with the measured numbers, where each test must pass.
 3. Read the four lines that start with `unseen:` and the exit code.
 4. Run the script one more time on `main`, for the comparison: `sh .claude/skills/unseen-check/unseen.sh .` when this repo is a clean checkout of `main`. If it is not, say so and leave the comparison out.
-5. Only when the exit code of step 2 is 1: open the file that its last line names, and for each failing record of an unseen file whose `got:` line is not an error, find which feature gives the wrong value. Keep the queries to yourself.
+5. When the exit code of step 2 is 1: do not open the output file. It has the unseen queries and their expected results, and no agent reads them. Report the count and the path of the file. A person opens it.
 6. Report in this form, with the real numbers:
 
    ```
@@ -44,7 +44,7 @@ So the result that counts is the number of wrong values, and it must be 0.
    slt_good_1.test: <passed>/<applicable> (main: <passed>)
    slt_good_2.test: <passed>/<applicable> (main: <passed>)
    Wrong values: <n>
-   Result: PASS (no wrong value) or FAIL (<n> wrong values, in <features>)
+   Result: PASS (no wrong value) or FAIL (<n> wrong values, a person must read the output file)
    Output file: <the file that step 2 named>
    ```
 
@@ -57,12 +57,12 @@ So the result that counts is the number of wrong values, and it must be 0.
 ## Evidence to save
 
 The four `unseen:` lines, the exit code, and the commit that was checked.
-Each run writes its full output to a file of its own, `run-<time>.txt`, in the directory of the unseen files. Do not publish these files: they have the queries.
+Each run writes its full output to a file of its own, `run-<time>-<random>`, in the directory of the unseen files. Do not open or publish these files: they have the queries.
 
 ## Stop and ask
 
 Stop, change nothing, and tell the person what is missing when:
 
-- the exit code is 2. The message says why: no lekha directory, no Docker image, no network for the first download, or a checksum that does not match.
+- the exit code is 2. The message says why: no lekha directory, no Docker image, no network for the first download, a checksum that does not match, or a directory that does not pass its own tests. The check needs a tree whose own tests pass, with the correct number in `tests/slt/baseline.txt`.
 - the directory has no `tests/slt.rs`, or the commit is older than the harness.
 - you are not sure which commit or directory the person means.
