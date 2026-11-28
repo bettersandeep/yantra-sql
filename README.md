@@ -54,15 +54,20 @@ The author offers GPL, BSD, MIT or CC0, and this repo uses the file under MIT.
 
 The engine runs `SELECT [ALL | DISTINCT] <item> {, <item>}` without `FROM`.
 An item is an expression with an optional alias.
-An expression can use integer literals, unary `+` and `-`, binary `+ - * / %` and parentheses.
+An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, parentheses, `COALESCE` and `NULLIF`.
 The arithmetic follows SQLite.
 Division truncates toward zero.
 The result of `%` has the sign of the left operand.
 Division or modulo by zero gives NULL.
-The engine returns an error for each other statement or expression, and for integer overflow.
+Arithmetic with a NULL operand gives NULL.
+`COALESCE` takes two or more arguments and returns the first one that is not NULL, or NULL when all are NULL.
+`NULLIF` takes two arguments and returns NULL when they are equal, and the first argument in each other case.
+Function names are case-insensitive.
+The engine computes each argument of a function, so an error in an argument is an error for the statement.
+The engine returns an error for each other statement, expression or function, for a wrong number of arguments and for integer overflow.
 A SQLite keyword is not accepted as an alias.
 An expression that is nested more than 100 levels deep is an error.
-Score: 4577 of 10012 records pass in `random/expr/slt_good_0.test`.
+Score: 5021 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 ## Rules and checks
 
