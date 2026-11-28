@@ -1,0 +1,31 @@
+name: guard
+# Rule 6 of AGENTS.md: a check does not come from the change that it checks.
+# pull_request_target: GitHub takes this file from the base branch, so a pull
+# request cannot change or remove it. The job runs no code of the pull request.
+# It runs the guard script of the base branch on the files of the pull request.
+on:
+  pull_request_target:
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Guard of the base branch on the files of the pull request
+        run: |
+          # The base guard goes to a file outside the checkout first. A pull
+          # request can make ci/guard.sh a symlink, and a redirect follows it.
+          git show "origin/${GITHUB_BASE_REF}:ci/guard.sh" > "$RUNNER_TEMP/guard.sh"
+          test -s "$RUNNER_TEMP/guard.sh"
+          if [ -L ci ] || [ ! -d ci ]; then
+            echo "guard: ci is not a plain directory in this pull request" >&2
+            exit 1
+          fi
+          rm -f ci/guard.sh
+          cp "$RUNNER_TEMP/guard.sh" ci/guard.sh
+          sh ci/guard.sh
