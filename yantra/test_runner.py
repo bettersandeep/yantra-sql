@@ -1356,6 +1356,9 @@ class LocalFlowTest(unittest.TestCase):
         state, note, run = self.flow([self.FOUND, self.STILL_OPEN, self.STILL_OPEN])
         self.assertEqual((state, run.starts, self.steps), ("needs", 2, self.ROUND * 2))  # no commit, no push
         self.assertIn("the Qodo local review has 1 open finding(s) at the threshold and no fix attempt is left", note)
+        self.assertIn("is not committed", note)
+        for part in (self.LINE % (1, 0, 1), "Open after the local review:\n\n```text\n- Modulo by zero crashes"):
+            self.assertIn(part, self.comments[-1])
 
     def test_a_command_that_passes_its_time_limit_leaves_no_process(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1371,9 +1374,6 @@ class LocalFlowTest(unittest.TestCase):
                 return
             time.sleep(0.1)
         self.fail("the child process of the command is still there")
-        self.assertIn("is not committed", note)
-        for part in (self.LINE % (1, 0, 1), "Open after the local review:\n\n```text\n- Modulo by zero crashes"):
-            self.assertIn(part, self.comments[-1])
 
     def test_a_finding_that_the_agent_rejects_needs_a_human_at_once(self):
         # The agent changes nothing in its round, and says why in its report. A person decides.
