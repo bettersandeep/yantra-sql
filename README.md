@@ -54,7 +54,7 @@ The author offers GPL, BSD, MIT or CC0, and this repo uses the file under MIT.
 
 The engine runs `SELECT [ALL | DISTINCT] <item> {, <item>}` without `FROM`.
 An item is an expression with an optional alias.
-An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX` and `SUM`.
+An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM` and `CAST(<expr> AS INTEGER)`.
 The arithmetic follows SQLite.
 Division truncates toward zero.
 The result of `%` has the sign of the left operand.
@@ -70,11 +70,14 @@ The argument of an aggregate function can start with `ALL` or `DISTINCT`.
 An aggregate function inside the argument of an aggregate function is an error.
 `MIN` and `MAX` with two or more arguments are errors.
 Function names are case-insensitive.
+`CAST(<expr> AS INTEGER)` returns the value of its argument without change, because each value of the engine is an integer or NULL.
+`CAST`, `AS` and `INTEGER` are case-insensitive.
+A `CAST` to each other type is an error, and so is a `CAST` with no type.
 The engine computes each argument of a function, so an error in an argument is an error for the statement.
 The engine returns an error for each other statement, expression or function, for a wrong number of arguments and for integer overflow.
 A SQLite keyword is not accepted as an alias.
 An expression that is nested more than 100 levels deep is an error.
-Score: 7981 of 10012 records pass in `random/expr/slt_good_0.test`.
+Score: 8995 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 ## Rules and checks
 
