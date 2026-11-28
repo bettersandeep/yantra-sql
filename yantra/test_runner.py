@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1351,9 +1352,25 @@ class LocalFlowTest(unittest.TestCase):
         self.assertIn("no fix attempt is left", note)
 
     def test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit(self):
+        # the local review gets 1 fix round. A finding that is still open after it stops the run.
         state, note, run = self.flow([self.FOUND, self.STILL_OPEN, self.STILL_OPEN])
-        self.assertEqual((state, run.starts, self.steps), ("needs", 3, self.ROUND * 3))  # no commit, no push
+        self.assertEqual((state, run.starts, self.steps), ("needs", 2, self.ROUND * 2))  # no commit, no push
         self.assertIn("the Qodo local review has 1 open finding(s) at the threshold and no fix attempt is left", note)
+
+    def test_a_command_that_passes_its_time_limit_leaves_no_process(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "pid")
+            code, out, err = runner.sh(["sh", "-c", "sleep 30 & echo $! > %s; wait" % path], timeout=1)
+            self.assertEqual((code, err), (124, "timeout after 1 seconds"))
+            with open(path, encoding="utf-8") as f:
+                child = int(f.read())
+        for _ in range(50):  # the system needs a moment to remove the killed process
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("the child process of the command is still there")
         self.assertIn("is not committed", note)
         for part in (self.LINE % (1, 0, 1), "Open after the local review:\n\n```text\n- Modulo by zero crashes"):
             self.assertIn(part, self.comments[-1])

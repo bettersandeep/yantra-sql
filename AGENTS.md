@@ -88,7 +88,7 @@ The yantra runner enforces this gate on each ticket, in this order.
 A person merges.
 The runner never merges.
 
-1. Local review: before each commit, Qodo reviews the work that is not committed yet (`qodo review`). A finding at the threshold goes back to the agent and uses a fix round of step 7. The runner commits only when no such finding is open. If the review cannot run, there is no commit. Qodo reviews a snapshot of the work in a copy that the agent cannot write to, and the runner makes the commit from that same snapshot.
+1. Local review: before each commit, Qodo reviews the work that is not committed yet (`qodo review`). A finding at the threshold goes back to the agent 1 time in a run, and that uses a fix round of step 7. The runner commits only when no such finding is open. If the review cannot run, there is no commit. Qodo reviews a snapshot of the work in a copy that the agent cannot write to, and the runner makes the commit from that same snapshot.
 2. Scope: each changed path of the commit is inside the `Scope:` line of the ticket.
 3. Guard: `ci/guard.sh` from the base branch passes.
 4. Build, lint and tests: `cargo fmt --check`, `cargo clippy` with warnings as errors, and `cargo test` pass.

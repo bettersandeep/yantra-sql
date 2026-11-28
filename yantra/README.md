@@ -84,6 +84,7 @@ It changes nothing.
 
 The runner has 2 fix attempts for one ticket.
 A failed check, a local review with findings and a pull request review with findings each use one.
+The local review gets 1 of them at most in a run: when it still has an open finding after that round, the run ends `needs-human`.
 So one ticket gets 3 agent starts at most, and the pull request gets 3 commits at most.
 The commit of the first start has the message `Ticket #<N>: <title>`.
 Each later one has `Ticket #<N>: fixes after checks or review, round <k>`.

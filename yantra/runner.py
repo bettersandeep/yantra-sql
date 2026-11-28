@@ -666,21 +666,31 @@ def sh(cmd, cwd=None, timeout=300, env=None):
     if env:
         env = {name: value for name, value in dict(os.environ, **env).items() if value is not None}
     try:
-        done = subprocess.run(
+        done = subprocess.Popen(
             cmd,
             cwd=cwd,
             env=env or None,
-            timeout=timeout,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="replace",
+            start_new_session=True,  # a process group of its own, so that the time limit can kill all of it
         )
-    except subprocess.TimeoutExpired:
-        return 124, "", "timeout after %d seconds" % timeout
     except OSError as error:
         return 127, "", str(error)
-    return done.returncode, done.stdout, done.stderr
+    try:
+        out, err = done.communicate(timeout=timeout)
+    except BaseException as stop:  # the time limit, Ctrl-C or SIGTERM: no process of the command stays behind
+        try:
+            os.killpg(done.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        done.communicate()
+        if isinstance(stop, subprocess.TimeoutExpired):
+            return 124, "", "timeout after %d seconds" % timeout
+        raise
+    return done.returncode, out, err
 
 
 def gh_json(args):
@@ -966,6 +976,7 @@ class Run:
         self.log("old score: %d" % self.old)
 
         attempts = FIX_ATTEMPTS
+        local_round = True  # findings of the local review get 1 of the fix attempts, not more
         extra = ""
         why = ""  # the reason of a fix round. The next local review gets it as `recent_work`.
         handled = 0  # reviews with findings that went back to the agent
@@ -987,13 +998,14 @@ class Run:
             blocking = self.local_review(criteria, recent, after)
             if blocking:
                 names = "; ".join(finding["title"] for finding in blocking)
-                if not attempts:
+                if not (attempts and local_round):
                     raise NeedsHuman(
-                        "the Qodo local review has %d open finding(s) at the threshold and no fix attempt is left. "
+                        "the Qodo local review has %d open finding(s) at the threshold and no fix attempt is left for it. "
                         "The work of the last round is not committed. It is in the clone of the run directory:\n%s"
                         % (len(blocking), fenced(titles(blocking)))
                     )
                 attempts -= 1
+                local_round = False
                 extra = local_text(self.save_input("local-review-%d.md" % self.local_reviews, findings_text(blocking)))
                 why = "The agent got a fix round for these findings of the earlier local review: " + names
                 continue
