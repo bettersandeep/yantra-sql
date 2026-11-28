@@ -1,19 +1,56 @@
 # lekha
 
 A small SQL database that gives the same answers as SQLite.
+AI coding agents write it, SQLite's public test suite scores it, and Qodo reviews each change before it merges.
 "Lekha" is Sanskrit for a written record.
 
-AI coding agents write this code.
-SQLite's public test suite scores it, and Qodo reviews each change before it merges.
+**Try it in your browser: https://bettersandeep.github.io/lekha/**
+The page runs the engine in your browser, and its second button asks the same engine on a Raspberry Pi.
+
+**Score: 9,986 of 10,012** queries of one SQLite test file give the same answer as SQLite.
+On 20,024 more queries that the agents never saw, 19,987 are right and 0 give a wrong value.
+Each miss is an error that says "not supported".
+
+```mermaid
+xychart-beta
+    title "Queries right after each ticket (of 10,012)"
+    x-axis ["start", "arithmetic", "NULL", "aggregates", "CAST", "comparisons", "CASE", "limits", "real numbers"]
+    y-axis "queries right" 0 --> 10012
+    line [0, 4577, 5021, 7981, 8995, 8995, 9644, 9644, 9986]
+```
+
+| Ticket | Pull request | Score after |
+|---|---|---|
+| [#2](https://github.com/bettersandeep/lekha/issues/2) integer arithmetic | [#4](https://github.com/bettersandeep/lekha/pull/4) | 4,577 |
+| [#10](https://github.com/bettersandeep/lekha/issues/10) NULL, COALESCE, NULLIF | [#12](https://github.com/bettersandeep/lekha/pull/12) | 5,021 |
+| [#11](https://github.com/bettersandeep/lekha/issues/11) COUNT, MIN, MAX, SUM | [#14](https://github.com/bettersandeep/lekha/pull/14) | 7,981 |
+| [#18](https://github.com/bettersandeep/lekha/issues/18) CAST to INTEGER | [#19](https://github.com/bettersandeep/lekha/pull/19) | 8,995 |
+| [#20](https://github.com/bettersandeep/lekha/issues/20) comparisons, AND, OR, NOT | [#23](https://github.com/bettersandeep/lekha/pull/23) | 8,995 |
+| [#24](https://github.com/bettersandeep/lekha/issues/24) CASE | [#30](https://github.com/bettersandeep/lekha/pull/30) | 9,644 |
+| [#13](https://github.com/bettersandeep/lekha/issues/13) SQLite's limits | [#33](https://github.com/bettersandeep/lekha/pull/33) | 9,644 |
+| [#45](https://github.com/bettersandeep/lekha/issues/45) real numbers, CAST to REAL, AVG | [#56](https://github.com/bettersandeep/lekha/pull/56) | 9,986 |
+
+## The factory
 
 This repo is an entry in the Qodo Software Factory Hackathon.
-It holds two things: the database, and the factory around it.
-The factory is the working process that takes a ticket to a reviewed pull request: the tickets, the rules for the agents, the checks, the review and the gates.
-The parts of the factory are added to this repo one at a time.
+It holds two things: the database, and the factory around it, which has the name yantra.
+The factory is the working process that takes a ticket to a reviewed pull request, and to a person who decides.
+
+![The factory: from a ticket to main, and after](docs/factory.png)
+
+Blue is a gate, yellow is a step that a person does by hand, red is a stop.
+The source of the picture is `docs/factory.mmd`.
+
+- `AGENTS.md`: the rules for the agents and the quality gate. Each rule names the check behind it.
+- `yantra/`: the runner. `yantra/README.md` has the flow, the labels and the limits of the agent.
+- `ci/guard.sh`: a pull request cannot change the engine and the things that measure it in one change.
+- `.claude/skills/unseen-check/`: the check on SQLite test files that the agents never see.
+- `.pr_agent.toml`: the setup of the Qodo review.
+- Branch [`evidence`](https://github.com/bettersandeep/lekha/tree/evidence): the saved reviews, logs and screenshots that the hackathon posts link to.
 
 ## Rule of this repo
 
-The first commit is a seed made by hand: an empty crate, CI and the licence.
+The first commit is a seed that did not come through a pull request: an empty crate, CI and the licence.
 Each change after the seed arrives as a pull request with a Qodo review.
 
 ## Design decisions

@@ -1,0 +1,30 @@
+flowchart TD
+    T["Ticket<br/>acceptance criteria + Scope line"] --> W["Check the ticket with Codebase Wisdom<br/>BY HAND"]
+    W --> G{{"Person puts the label agent-go"}}
+    G --> R["Runner: new clone, one coding agent<br/>the agent can edit the clone and run one command"]
+    R --> LR{{"Gate 1: Qodo local review<br/>of a snapshot, before the commit"}}
+    LR -->|"finding at the threshold: 1 fix round"| R
+    LR -->|clean| C["Commit by the runner<br/>from the reviewed snapshot"]
+    C --> K{{"Gates 2 to 5: scope, guard,<br/>build and tests, score"}}
+    K -->|fail: fix round| R
+    K -->|pass| PR["Pull request"]
+    PR --> CI{{"CI, and the guard<br/>from the base branch"}}
+    PR --> Q{{"Gates 6 and 7: Qodo review<br/>of the head commit, read as a record"}}
+    CI -->|fail: fix round| R
+    Q -->|"finding at the threshold: fix round"| R
+    CI -->|pass| RH["ready-for-human<br/>low findings are listed, not fixed"]
+    Q -->|"complete, nothing open"| RH
+    RH --> U{{"Person: unseen-file check with the skill,<br/>reads the listed findings, decides"}}
+    U -->|merge| M["main"]
+    U -->|"new ticket for a listed finding"| T
+    M --> D["Live page deploys by itself<br/>Raspberry Pi update: BY HAND"]
+    D --> MON["Checkly asks the Pi a known query<br/>every 10 minutes, alert by email"]
+    M --> AR["Arnica scan of a copy in an organisation<br/>push of the copy: BY HAND"]
+    R -.->|"2 fix rounds used, a finding outside the Scope,<br/>or a review answer that the runner does not understand"| NH["needs-human: NOT DONE<br/>comment on the ticket with the reason"]
+    NH -.->|"person changes the ticket or finishes by hand"| G
+    classDef hand fill:#fff3cd,stroke:#b58900,color:#000
+    classDef stop fill:#f8d7da,stroke:#a94442,color:#000
+    classDef gate fill:#e7f1ff,stroke:#1f6feb,color:#000
+    class W,D,AR,U hand
+    class NH stop
+    class LR,K,CI,Q gate
