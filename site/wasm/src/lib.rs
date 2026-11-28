@@ -66,8 +66,12 @@ fn answer(sql: &[u8]) -> String {
                 Value::Null => json.push_str("null"),
                 Value::Integer(i) => quote(&mut json, &i.to_string()),
                 Value::Text(s) => quote(&mut json, s),
-                // The engine returns no real today. The page does not guess how SQLite prints one.
-                Value::Real(_) => return error("The page cannot show a real value yet."),
+                // The text of SQLite for `CAST ( <real> AS TEXT )`, from the engine.
+                // A value that is not a finite number has no such text. The page does not guess.
+                Value::Real(r) => match lekha::real_text(*r) {
+                    Some(text) => quote(&mut json, &text),
+                    None => return error("The page cannot show a number that is not finite."),
+                },
             }
         }
         json.push(']');
@@ -113,6 +117,40 @@ mod tests {
         assert_eq!(
             answer(b"\xff"),
             r#"{"ok":false,"error":"The SQL is not UTF-8."}"#
+        );
+    }
+
+    // Each text is the answer of SQLite 3.46.1 for `SELECT CAST(<expr> AS TEXT)`.
+    #[test]
+    fn answer_has_the_text_of_sqlite_for_a_real_value() {
+        assert_eq!(
+            answer(
+                b"SELECT CAST(1 AS REAL), CAST(7 AS REAL) / 2, - CAST(7 AS REAL) / 2, AVG(3), \
+                  CAST(1 AS REAL) / 3, CAST(9223372036854775807 AS REAL), \
+                  CAST(1 AS REAL) / 100000, 0 * - CAST(1 AS REAL), CAST(NULL AS REAL), \
+                  CAST(999999999999999 AS REAL), CAST(1000000000000000 AS REAL), \
+                  CAST(1000000000000025 AS REAL), CAST(1 AS REAL) / 10000"
+            ),
+            concat!(
+                r#"{"ok":true,"rows":[["1.0","3.5","-3.5","3.0","0.333333333333333","#,
+                r#""9.22337203685478e+18","1.0e-05","0.0",null,"999999999999999.0","#,
+                r#""1.0e+15","1.00000000000003e+15","0.0001"]]}"#
+            )
+        );
+        // The example of the page with a real value.
+        assert_eq!(
+            answer(b"SELECT AVG(7), CAST(7 AS REAL) / 2, CAST(1 AS REAL) / 3"),
+            r#"{"ok":true,"rows":[["7.0","3.5","0.333333333333333"]]}"#
+        );
+        // A real literal is not built, and a result that is not finite is an error.
+        assert_eq!(
+            answer(b"SELECT 1.5"),
+            r#"{"ok":false,"error":"unsupported character at byte 8"}"#
+        );
+        let seventeen = ["CAST(9223372036854775807 AS REAL)"; 17].join(" * ");
+        assert_eq!(
+            answer(format!("SELECT {seventeen}").as_bytes()),
+            r#"{"ok":false,"error":"the result is not a finite number"}"#
         );
     }
 

@@ -1,1 +1,1 @@
-random/expr/slt_good_0.test 9644
+random/expr/slt_good_0.test 9986
