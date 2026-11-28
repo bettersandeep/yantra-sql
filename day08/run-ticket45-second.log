@@ -1,0 +1,145 @@
+2026-11-28T09:59:03Z $ gh repo clone bettersandeep/lekha /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo
+exit code 0
+Cloning into '/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo'...
+2026-11-28T09:59:03Z $ git -c core.hooksPath=/dev/null for-each-ref --format=%(refname:short) refs/remotes/origin/
+exit code 0
+origin
+origin/agents-md
+origin/branch-names
+origin/case-expressions-in-select-24
+origin/demo-site
+origin/evidence
+origin/expr-arith
+origin/forbid-unsafe
+origin/local-review
+origin/main
+origin/pi-server
+origin/post-merge-findings
+origin/readme-first-screen
+origin/rename-lekha
+origin/review-record
+origin/rule-check-source
+origin/runner-state
+origin/server-checks
+origin/server-ci
+origin/slt-harness
+origin/the-engine-returns-a-13
+origin/ticket-10
+origin/ticket-11
+origin/ticket-18
+origin/ticket-20
+origin/unseen-skill
+origin/yantra-runner
+2026-11-28T09:59:03Z $ git -c core.hooksPath=/dev/null checkout -b real-numbers-cast-to-45 origin/main
+exit code 0
+branch 'real-numbers-cast-to-45' set up to track 'origin/main'.
+Switched to a new branch 'real-numbers-cast-to-45'
+2026-11-28T09:59:03Z $ git -C /Users/sandeepsingh/anti-gravity/qudo/lekha config user.name
+exit code 0
+Sandeep Singh
+2026-11-28T09:59:03Z $ git -C /Users/sandeepsingh/anti-gravity/qudo/lekha config user.email
+exit code 0
+14184381+bettersandeep@users.noreply.github.com
+2026-11-28T09:59:03Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse origin/main^{tree}
+exit code 0
+35e67ab9803ca59fb75918ebf2f02a7f3f40e153
+2026-11-28T09:59:03Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com show origin/main:ci/guard.sh
+exit code 0
+#!/bin/sh
+# Checks that protect the score. CI runs this before the build.
+set -eu
+cd "$(dirname "$0")/.."
+tmp=$(mktemp -d)
+
+# 1. The manifest lists each test file and nothing else, and each file
+#    matches its checksum. A count is not enough: the paths are compared.
+(
+	cd tests/slt
+	find . -name '*.test' | sed 's|^\./||' | LC_ALL=C sort >"$tmp/files"
+	cut -c67- SHA256SUMS | LC_ALL=C sort >"$tmp/listed"
+	if ! diff "$tmp/files" "$tmp/listed"; then
+		echo "guard: the test files and SHA256SUMS do not list the same paths" >&2
+		exit 1
+	fi
+	sha256sum -c --quiet SHA256SUMS
+)
+
+# 2. No dependency. The lock file has one package. The cargo commands in CI
+#    use --locked, so a dependency in Cargo.toml that is not in the lock file
+#    stops the build.
+if [ "$(grep -c '^\[\[package\]\]' Cargo.lock)" -ne 1 ]; then
+	echo "guard: Cargo.lock has more than one package" >&2
+	exit 1
+fi
+
+# 3. In a pull request, a change to the engine and a change to the things
+#    that measure it do not go together. Check 1 alone cannot stop a pull
+#    request that edits a test file and its checksum in one change.
+#    --no-renames: a rename shows its old path too, so a file that moves
+#    from the measure side into src/ is seen on both sides.
+#    yantra/ is on the measure side: the runner and the brief of the agents
+#    check the engine, so the engine does not change with them.
+#    .claude/skills/unseen-check/ is there too: it is the check on test
+#    files that the agents never see.
+if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request_target ]; then
+	changed=$(git -c core.quotePath=false diff --no-renames --name-only "origin/${GITHUB_BASE_REF}...HEAD")
+	# The code that CI checks: the engine, the server, and the site with its wasm glue.
+	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$|server/|site/)' || true)
+	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/|\.claude/skills/unseen-check/)' | grep -v '^tests/slt/baseline\.txt$' || true)
+	if [ -n "$engine" ] && [ -n "$measure" ]; then
+		echo "guard: this pull request changes the engine and the things that measure it" >&2
+		printf 'engine:\n%s\nmeasure:\n%s\n' "$engine" "$measure" >&2
+		exit 1
+	fi
+fi
+echo "guard: ok"
+2026-11-28T09:59:03Z old score: 9644
+2026-11-28T09:59:03Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T09:59:03Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+35e67ab9803ca59fb75918ebf2f02a7f3f40e153
+2026-11-28T09:59:03Z agent start 1: claude -p <prompt> --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo/**) Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/input/**) Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo/**) Bash(/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/bin/yt *) --disallowedTools Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo/.git/**) --permission-mode dontAsk --strict-mcp-config --safe-mode
+2026-11-28T10:07:49Z agent start 1: exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+5418f82583cce1ab9a8b6f7160ff66f1f826f0e6
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD
+exit code 0
+d3d98ae100271ce36aa0dc26a82e13b3e399d28b
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com worktree add -q -b yantra-review /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/review d3d98ae100271ce36aa0dc26a82e13b3e399d28b
+exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null reset -q --soft d3d98ae100271ce36aa0dc26a82e13b3e399d28b
+exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null read-tree -u --reset 5418f82583cce1ab9a8b6f7160ff66f1f826f0e6
+exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null clean -ffdxq
+exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null diff --quiet
+exit code 0
+2026-11-28T10:07:49Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+5418f82583cce1ab9a8b6f7160ff66f1f826f0e6
+2026-11-28T10:08:49Z $ qodo review --json --full --ticket https://github.com/bettersandeep/lekha/issues/45 --context-file /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/local-review-context.json
+exit code 0
+{"findings":[{"id":"26c54fb9-10fc-465c-87ba-57db24e2cc81","title":"Playground mislabels a working example","description":"Adding `AVG` to aggregate dispatch makes `SELECT AVG(1)` succeed, but the playground still lists that exact query under “Examples that are not built yet.” Visitors who click it get a result despite the page saying it is unsupported, and visitors scanning the examples are incorrectly told the feature is unavailable.","category":"Correctness","action_level":"remediation_recommended","attribution_status":"pending","git_sha":"d3d98ae100271ce36aa0dc26a82e13b3e399d28b","location":{"file_path":"src/select.rs","start_line":545,"end_line":545,"side":"right"},"evidence":{"citations":[{"source_type":"pr_branch_file","source":"src/select.rs[543-545]"},{"source_type":"pr_branch_file","source":"src/lib.rs[155-160]"},{"source_type":"pr_branch_file","source":"site/index.html[35-47]"}]}}],"finding_state":{"complete":true,"introduced":["26c54fb9-10fc-465c-87ba-57db24e2cc81"],"resolved":[],"still_open":[],"dismissed":[]},"review_agent_comment":"Nothing to comment.","meta":{"analysis":{"attempted_mode":"full","mode":"full","reason":"full_review_requested"},"checkpoint":{"base_sha":"d3d98ae100271ce36aa0dc26a82e13b3e399d28b","coverage_started_at":"2026-11-28T10:07:54.046127+00:00","created_at":"2026-11-28T10:07:54.046127+00:00","id":"15c1b0c5ff914579a8aefec2619cce84","sequence":42705,"tree_sha":"5418f82583cce1ab9a8b6f7160ff66f1f826f0e6","version":1},"context":{"author_notes":{"input_chars":1895,"max_tokens":16000,"offloaded":false,"original_tokens":499,"outcome":"inline","rendered_chars":2065},"ticket_bodies":[{"index":1,"input_chars":3779,"max_tokens":5000,"offloaded":false,"original_tokens":944,"outcome":"inline","rendered_chars":3779}]},"coverage":{"complete":true},"depth":"auto","org_config":"applied","reviewers":{"ran":["issue","compliance"],"skipped":["skills","spec","ui","persona","cross_repo"]},"run":{"effort":{"effective":"standard","requested":"auto"},"id":"9f92086d-e8ea-488a-933b-16f6ebe40ab2","passes":[{"agent_statuses_reported":true,"agents":[{"duration_ms":14119,"models":["multi-provider/claude-haiku-5-5"],"name":"compliance-agent-turbo","status":"completed"},{"duration_ms":48243,"models":["multi-provider/gpt-5.6-luna","multi-provider/gpt-6-sol"],"name":"issue-review-agent-gpt-6-sol_thinking","status":"completed"},{"name":"spec-agent","reason":"no_spec_content","status":"skipped"}],"duration_ms":52233,"effort":"standard","kind":"primary","started_at":"2026-11-28T10:07:56.761004+00:00"}],"snapshot":{"base_sha":"d3d98ae100271ce36aa0dc26a82e13b3e399d28b","commit_sha":"d3d98ae100271ce36aa0dc26a82e13b3e399d28b","tree_sha":"5418f82583cce1ab9a8b6f7160ff66f1f826f0e6"},"timing":{"duration_ms":55258,"finished_at":"2026-11-28T10:08:49.304261+00:00","started_at":"2026-11-28T10:07:54.046127+00:00"}},"safety_net":{"ran":false,"reinjected":0},"skipped_files":[],"local_review_ids":{"26c54fb9-10fc-465c-87ba-57db24e2cc81":"7c432822-8589-4ab0-be4e-aeaaed56988c"}}}
+No verified PR target. Comparing against origin/main without a PR target for linking.
+Reviewing bettersandeep/lekha @ d3d98ae10 — 58240B of local changes · auto depth (base cloned by the reviewer)
+Local comparison: no saved checkpoint is available. The server will recover history or report a full fallback.
+  trace 3aa4451a7ffa91cf2f1c56d4f5c5e94a
+2026-11-28T10:08:49Z local review 1: 60 seconds, 1 findings in the result, 1 open at the threshold, 0 open informational, 0 dismissed
+2026-11-28T10:08:50Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:08:50Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+5418f82583cce1ab9a8b6f7160ff66f1f826f0e6
+2026-11-28T10:08:50Z agent start 2: claude -p <prompt> --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo/**) Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/input/**) Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo/**) Bash(/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/bin/yt *) --disallowedTools Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T095856Z/repo/.git/**) --permission-mode dontAsk --strict-mcp-config --safe-mode
+2026-11-28T10:09:33Z agent start 2: exit code 0
+2026-11-28T10:09:33Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:09:33Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+5418f82583cce1ab9a8b6f7160ff66f1f826f0e6
+2026-11-28T10:09:33Z end state: needs-human. the agent changed no file in round 2. Read its report.

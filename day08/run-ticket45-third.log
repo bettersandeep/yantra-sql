@@ -1,0 +1,353 @@
+2026-11-28T10:19:49Z $ gh repo clone bettersandeep/lekha /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo
+exit code 0
+Cloning into '/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo'...
+2026-11-28T10:19:49Z $ git -c core.hooksPath=/dev/null for-each-ref --format=%(refname:short) refs/remotes/origin/
+exit code 0
+origin
+origin/agents-md
+origin/branch-names
+origin/case-expressions-in-select-24
+origin/demo-site
+origin/evidence
+origin/expr-arith
+origin/forbid-unsafe
+origin/local-review
+origin/main
+origin/pi-server
+origin/post-merge-findings
+origin/readme-first-screen
+origin/rename-lekha
+origin/replay-12
+origin/replay-12-b
+origin/replay-12-base
+origin/review-config
+origin/review-record
+origin/rule-check-source
+origin/runner-state
+origin/server-checks
+origin/server-ci
+origin/slt-harness
+origin/the-engine-returns-a-13
+origin/ticket-10
+origin/ticket-11
+origin/ticket-18
+origin/ticket-20
+origin/unseen-skill
+origin/yantra-runner
+2026-11-28T10:19:49Z $ git -c core.hooksPath=/dev/null checkout -b real-numbers-cast-to-45 origin/main
+exit code 0
+branch 'real-numbers-cast-to-45' set up to track 'origin/main'.
+Switched to a new branch 'real-numbers-cast-to-45'
+2026-11-28T10:19:49Z $ git -C /Users/sandeepsingh/anti-gravity/qudo/lekha config user.name
+exit code 0
+Sandeep Singh
+2026-11-28T10:19:49Z $ git -C /Users/sandeepsingh/anti-gravity/qudo/lekha config user.email
+exit code 0
+14184381+bettersandeep@users.noreply.github.com
+2026-11-28T10:19:49Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse origin/main^{tree}
+exit code 0
+211203c250cb781f52fa35065eba8066a6b8875c
+2026-11-28T10:19:49Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com show origin/main:ci/guard.sh
+exit code 0
+#!/bin/sh
+# Checks that protect the score. CI runs this before the build.
+set -eu
+cd "$(dirname "$0")/.."
+tmp=$(mktemp -d)
+
+# 1. The manifest lists each test file and nothing else, and each file
+#    matches its checksum. A count is not enough: the paths are compared.
+(
+	cd tests/slt
+	find . -name '*.test' | sed 's|^\./||' | LC_ALL=C sort >"$tmp/files"
+	cut -c67- SHA256SUMS | LC_ALL=C sort >"$tmp/listed"
+	if ! diff "$tmp/files" "$tmp/listed"; then
+		echo "guard: the test files and SHA256SUMS do not list the same paths" >&2
+		exit 1
+	fi
+	sha256sum -c --quiet SHA256SUMS
+)
+
+# 2. No dependency. The lock file has one package. The cargo commands in CI
+#    use --locked, so a dependency in Cargo.toml that is not in the lock file
+#    stops the build.
+if [ "$(grep -c '^\[\[package\]\]' Cargo.lock)" -ne 1 ]; then
+	echo "guard: Cargo.lock has more than one package" >&2
+	exit 1
+fi
+
+# 3. In a pull request, a change to the engine and a change to the things
+#    that measure it do not go together. Check 1 alone cannot stop a pull
+#    request that edits a test file and its checksum in one change.
+#    --no-renames: a rename shows its old path too, so a file that moves
+#    from the measure side into src/ is seen on both sides.
+#    yantra/ is on the measure side: the runner and the brief of the agents
+#    check the engine, so the engine does not change with them.
+#    .claude/skills/unseen-check/ is there too: it is the check on test
+#    files that the agents never see.
+if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request_target ]; then
+	changed=$(git -c core.quotePath=false diff --no-renames --name-only "origin/${GITHUB_BASE_REF}...HEAD")
+	# The code that CI checks: the engine, the server, and the site with its wasm glue.
+	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$|server/|site/)' || true)
+	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/|\.claude/skills/unseen-check/)' | grep -v '^tests/slt/baseline\.txt$' || true)
+	if [ -n "$engine" ] && [ -n "$measure" ]; then
+		echo "guard: this pull request changes the engine and the things that measure it" >&2
+		printf 'engine:\n%s\nmeasure:\n%s\n' "$engine" "$measure" >&2
+		exit 1
+	fi
+fi
+echo "guard: ok"
+2026-11-28T10:19:49Z old score: 9644
+2026-11-28T10:19:49Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:19:49Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+211203c250cb781f52fa35065eba8066a6b8875c
+2026-11-28T10:19:49Z agent start 1: claude -p <prompt> --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/**) Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/input/**) Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/**) Bash(/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/bin/yt *) --disallowedTools Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/.git/**) --permission-mode dontAsk --strict-mcp-config --safe-mode
+2026-11-28T10:30:04Z agent start 1: exit code 0
+2026-11-28T10:30:04Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+212aea8e685842ebd6565f1e56c0533bdc128022
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD
+exit code 0
+5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com worktree add -q -b yantra-review /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/review 5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0
+exit code 0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null reset -q --soft 5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0
+exit code 0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null read-tree -u --reset 212aea8e685842ebd6565f1e56c0533bdc128022
+exit code 0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null clean -ffdxq
+exit code 0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null diff --quiet
+exit code 0
+2026-11-28T10:30:05Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+212aea8e685842ebd6565f1e56c0533bdc128022
+2026-11-28T10:30:59Z $ qodo review --json --full --ticket https://github.com/bettersandeep/lekha/issues/45 --context-file /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/local-review-context.json
+exit code 0
+{"findings":[{"id":"5015abac-6237-490d-9d88-71c23af53750","title":"Real-heavy queries format unused digits","description":"`real_text` formats every finite nonzero value to 766 decimal places, then retains only the first 15 significant digits. The server and browser call it for each real result, so queries returning many real columns repeatedly pay for formatting and allocating digits that cannot appear in the response.","category":"Performance","action_level":"remediation_recommended","attribution_status":"pending","git_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","location":{"file_path":"src/lib.rs","start_line":45,"end_line":45,"side":"right"},"evidence":{"citations":[{"source_type":"pr_branch_file","source":"src/lib.rs[35-54]"},{"source_type":"pr_branch_file","source":"server/src/lib.rs[169-176]"},{"source_type":"pr_branch_file","source":"site/wasm/src/lib.rs[69-74]"},{"source_type":"pr_branch_file","source":"src/select.rs[875-882]"}]}}],"finding_state":{"complete":true,"introduced":["5015abac-6237-490d-9d88-71c23af53750"],"resolved":[],"still_open":[],"dismissed":[]},"review_agent_comment":"Nothing to comment.","meta":{"analysis":{"attempted_mode":"full","mode":"full","reason":"full_review_requested"},"checkpoint":{"base_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","coverage_started_at":"2026-11-28T10:30:09.620785+00:00","created_at":"2026-11-28T10:30:09.620785+00:00","id":"77455f51825a4e708742b4669e951df8","sequence":42715,"tree_sha":"212aea8e685842ebd6565f1e56c0533bdc128022","version":1},"context":{"author_notes":{"input_chars":2054,"max_tokens":16000,"offloaded":false,"original_tokens":537,"outcome":"inline","rendered_chars":2224},"ticket_bodies":[{"index":1,"input_chars":3933,"max_tokens":5000,"offloaded":false,"original_tokens":983,"outcome":"inline","rendered_chars":3933}]},"coverage":{"complete":true},"depth":"auto","org_config":"applied","reviewers":{"ran":["issue","compliance"],"skipped":["skills","spec","ui","persona","cross_repo"]},"run":{"effort":{"effective":"standard","requested":"auto"},"id":"ca0179c6-2a51-4b79-b00c-98eb526c3d9c","passes":[{"agent_statuses_reported":true,"agents":[{"duration_ms":19053,"models":["multi-provider/claude-haiku-5-5"],"name":"compliance-agent-turbo","status":"completed"},{"duration_ms":44906,"models":["multi-provider/gpt-5.6-luna","multi-provider/gpt-6-sol"],"name":"issue-review-agent-gpt-6-sol_thinking","status":"completed"},{"name":"spec-agent","reason":"no_spec_content","status":"skipped"}],"duration_ms":46441,"effort":"standard","kind":"primary","started_at":"2026-11-28T10:30:12.279190+00:00"}],"snapshot":{"base_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","commit_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","tree_sha":"212aea8e685842ebd6565f1e56c0533bdc128022"},"timing":{"duration_ms":49445,"finished_at":"2026-11-28T10:30:59.066772+00:00","started_at":"2026-11-28T10:30:09.620785+00:00"}},"safety_net":{"ran":false,"reinjected":0},"skipped_files":[],"local_review_ids":{"5015abac-6237-490d-9d88-71c23af53750":"0f63c993-fc45-4b9a-8caa-e41ae998180b"}}}
+No verified PR target. Comparing against origin/main without a PR target for linking.
+Reviewing bettersandeep/lekha @ 5c7adb10f — 68444B of local changes · auto depth (base cloned by the reviewer)
+Local comparison: no saved checkpoint is available. The server will recover history or report a full fallback.
+  trace df9270a4d78ca0501e06342c97d01cbc
+2026-11-28T10:30:59Z local review 1: 54 seconds, 1 findings in the result, 1 open at the threshold, 0 open informational, 0 dismissed
+2026-11-28T10:31:00Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:31:00Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+212aea8e685842ebd6565f1e56c0533bdc128022
+2026-11-28T10:31:00Z agent start 2: claude -p <prompt> --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/**) Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/input/**) Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/**) Bash(/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/bin/yt *) --disallowedTools Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/.git/**) --permission-mode dontAsk --strict-mcp-config --safe-mode
+2026-11-28T10:32:59Z agent start 2: exit code 0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+acb32003dd6ac6bcf973889bfad47de925410077
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com diff --name-status --no-renames 212aea8e685842ebd6565f1e56c0533bdc128022 acb32003dd6ac6bcf973889bfad47de925410077
+exit code 0
+M	src/lib.rs
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD
+exit code 0
+5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null reset -q --soft 5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0
+exit code 0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null read-tree -u --reset acb32003dd6ac6bcf973889bfad47de925410077
+exit code 0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null clean -ffdxq
+exit code 0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null diff --quiet
+exit code 0
+2026-11-28T10:32:59Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+acb32003dd6ac6bcf973889bfad47de925410077
+2026-11-28T10:34:30Z $ qodo review --json --ticket https://github.com/bettersandeep/lekha/issues/45 --context-file /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/local-review-context.json
+exit code 0
+{"findings":[{"id":"5015abac-6237-490d-9d88-71c23af53750","title":"Real-heavy queries format unused digits","description":"`real_text` formats every finite nonzero value to 766 decimal places, then retains only the first 15 significant digits. The server and browser call it for each real result, so queries returning many real columns repeatedly pay for formatting and allocating digits that cannot appear in the response.","category":"Performance","action_level":"remediation_recommended","attribution_status":"implemented","git_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","location":{"file_path":"src/lib.rs","start_line":45,"end_line":45,"side":"right"},"evidence":{"citations":[{"source_type":"pr_branch_file","source":"src/lib.rs[35-54]"},{"source_type":"pr_branch_file","source":"server/src/lib.rs[169-176]"},{"source_type":"pr_branch_file","source":"site/wasm/src/lib.rs[69-74]"},{"source_type":"pr_branch_file","source":"src/select.rs[875-882]"}]}}],"finding_state":{"complete":true,"introduced":[],"resolved":["5015abac-6237-490d-9d88-71c23af53750"],"still_open":[],"dismissed":[]},"review_agent_comment":"Nothing to comment.","meta":{"analysis":{"attempted_mode":"incremental","baseline_checkpoint_id":"77455f51825a4e708742b4669e951df8","mode":"full","profile_changed":false,"reason":"delta_scope_unavailable"},"checkpoint":{"base_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","coverage_started_at":"2026-11-28T10:33:03.993440+00:00","created_at":"2026-11-28T10:33:03.993440+00:00","id":"80c108ee8a8741fb83c0298fa192f436","sequence":42716,"tree_sha":"acb32003dd6ac6bcf973889bfad47de925410077","version":1},"context":{"author_notes":{"input_chars":2054,"max_tokens":16000,"offloaded":false,"original_tokens":537,"outcome":"inline","rendered_chars":2224},"ticket_bodies":[{"index":1,"input_chars":3933,"max_tokens":5000,"offloaded":false,"original_tokens":983,"outcome":"inline","rendered_chars":3933}]},"coverage":{"complete":true},"depth":"auto","org_config":"applied","reviewers":{"ran":["issue","compliance"],"skipped":["skills","spec","ui","persona","cross_repo"]},"run":{"effort":{"effective":"standard","requested":"auto"},"id":"c395f8d1b11f4f559d3319017924b10d","passes":[{"agent_statuses_reported":true,"agents":[{"duration_ms":29453,"models":["multi-provider/claude-haiku-5-5"],"name":"compliance-agent-turbo","status":"completed"},{"duration_ms":71840,"models":["multi-provider/gpt-5.6-luna","multi-provider/gpt-6-sol"],"name":"issue-review-agent-gpt-6-sol_thinking","status":"completed"},{"name":"spec-agent","reason":"no_spec_content","status":"skipped"}],"duration_ms":76289,"effort":"standard","kind":"primary","started_at":"2026-11-28T10:33:09.490419+00:00"}],"snapshot":{"base_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","commit_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","tree_sha":"acb32003dd6ac6bcf973889bfad47de925410077"},"timing":{"duration_ms":85467,"finished_at":"2026-11-28T10:34:29.461087+00:00","started_at":"2026-11-28T10:33:03.993440+00:00"}},"safety_net":{"ran":false,"reinjected":0},"skipped_files":[],"local_review_ids":{"5015abac-6237-490d-9d88-71c23af53750":"0f63c993-fc45-4b9a-8caa-e41ae998180b"}}}
+No verified PR target. Comparing against origin/main without a PR target for linking.
+Reviewing bettersandeep/lekha @ 5c7adb10f — 71619B of local changes · auto depth (base cloned by the reviewer)
+  trace 1cc7a4e58ce9d3cbbb9b8257e6d537a3
+2026-11-28T10:34:30Z local review 2: 90 seconds, 1 findings in the result, 0 open at the threshold, 0 open informational, 0 dismissed
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD
+exit code 0
+5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD^{tree}
+exit code 0
+211203c250cb781f52fa35065eba8066a6b8875c
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com commit-tree acb32003dd6ac6bcf973889bfad47de925410077 -p 5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0 -m Ticket #45: Real numbers: CAST to REAL and AVG in SELECT without FROM
+exit code 0
+3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com reset -q --hard 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e
+exit code 0
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com clean -ffdxq
+exit code 0
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com status --porcelain --ignored
+exit code 0
+2026-11-28T10:34:30Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com -c core.quotePath=false diff --no-renames origin/main...HEAD --name-only
+exit code 0
+README.md
+server/README.md
+server/src/lib.rs
+site/index.html
+site/wasm/src/lib.rs
+src/lib.rs
+src/select.rs
+tests/slt/baseline.txt
+2026-11-28T10:34:30Z $ docker run --rm --network none --pull never -v /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo:/src:ro -v /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/guard.sh:/src/ci/guard.sh:ro golang:1.23 sh -c git config --global --add safe.directory "*" && cd /src && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main sh ci/guard.sh
+exit code 0
+guard: ok
+2026-11-28T10:34:34Z $ docker run --rm --network none --pull never -v /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo:/src:ro yantra-rust:1.96.1 sh -c cp -r /src /tmp/w && cd /tmp/w && cargo fmt --check && cargo clippy --locked --offline --all-targets -- -D warnings && cargo test --locked --offline -- --nocapture
+exit code 0
+metic_with_a_real_operand_is_real ... ok
+test select::tests::boolean_operators_and_case_with_real_values ... ok
+test select::tests::case_errors ... ok
+test select::tests::case_keywords_ignore_case_and_white_space ... ok
+test select::tests::case_with_a_base_takes_the_first_equal_when ... ok
+test select::tests::cast_errors ... ok
+test select::tests::avg_gives_a_real_value ... ok
+test select::tests::case_without_a_base_takes_the_first_true_when ... ok
+test select::tests::cast_ignores_case_and_white_space ... ok
+test select::tests::cast_to_integer_returns_the_argument ... ok
+test select::tests::coalesce_returns_the_first_value_that_is_not_null ... ok
+test select::tests::cast_to_real_gives_a_real_value ... ok
+test select::tests::cast_with_each_other_expression ... ok
+test select::tests::column_limit ... ok
+test select::tests::comparison_gives_one_zero_or_null ... ok
+test select::tests::count_of_the_one_row ... ok
+test select::tests::comparison_with_a_real_operand ... ok
+test select::tests::each_other_function_is_an_error ... ok
+test select::tests::comparison_result_is_an_integer_operand ... ok
+test select::tests::division_and_modulo_signs ... ok
+test select::tests::error_in_a_part_of_a_case_is_an_error ... ok
+test select::tests::function_names_ignore_case_and_white_space ... ok
+test select::tests::error_in_an_argument_is_an_error ... ok
+test select::tests::functions_with_real_values ... ok
+test select::tests::function_argument_limit ... ok
+test select::tests::deep_nesting_is_an_error ... ok
+test select::tests::i64_limits ... ok
+test select::tests::is_null_and_is_not_null_give_one_or_zero ... ok
+test select::tests::min_max_and_sum_of_one_value ... ok
+test select::tests::not_and_or_follow_three_valued_logic ... ok
+test select::tests::not_as_an_operand_takes_the_rest_of_the_expression ... ok
+test select::tests::null_literal_and_arithmetic ... ok
+test select::tests::nullif_compares_its_two_arguments ... ok
+test select::tests::other_aggregates_and_scalar_min_max_are_errors ... ok
+test select::tests::other_operators_are_errors ... ok
+test select::tests::overflow_is_an_error ... ok
+test select::tests::precedence_and_left_associativity ... ok
+test select::tests::precedence_of_comparison_and_boolean_operators ... ok
+test select::tests::real_division_by_zero_and_modulo ... ok
+test select::tests::real_values_that_stay_errors ... ok
+test select::tests::select_list_keywords_and_aliases ... ok
+test select::tests::unary_chains ... ok
+test select::tests::unsupported_input_is_an_error ... ok
+test select::tests::wrong_argument_count_is_an_error ... ok
+test select::tests::zero_division_and_null ... ok
+test tests::execute_returns_one_row ... ok
+test select::tests::height_limit_of_the_ticket ... ok
+test tests::real_text_is_the_text_of_sqlite ... ok
+test tests::version_is_set ... ok
+test select::tests::height_of_each_comparison_operator ... ok
+test select::tests::height_of_each_expression ... ok
+test select::tests::case_with_each_other_expression ... ok
+test tests::real_text_of_18_digits_is_the_text_of_the_exact_number ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 11 tests
+test baseline_must_match_exactly ... ok
+test comment_lines_are_removed_before_parsing ... ok
+test compare_applies_the_sort_mode ... ok
+test query_without_results_expects_an_empty_set ... ok
+test parse_reads_records_and_conditions ... ok
+test map_line_has_the_file_the_line_and_the_mark ... ok
+test render_follows_the_column_type ... ok
+test parse_fails_closed ... ok
+test unprintable_text_renders_as_at ... ok
+test run_decides_pass_or_fail ... ok
+slt: random/expr/slt_good_0.test 9986/10012
+test slt ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Checking lekha v0.0.0 (/tmp/w)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.73s
+   Compiling lekha v0.0.0 (/tmp/w)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.09s
+     Running unittests src/lib.rs (target/debug/deps/lekha-64235b9370dff239)
+     Running unittests src/main.rs (target/debug/deps/lekha-7c6faf1f186577e0)
+     Running tests/slt.rs (target/debug/deps/slt-5c1aafed4a72709e)
+   Doc-tests lekha
+2026-11-28T10:34:34Z checks passed, score 9644 -> 9986 of 10012
+2026-11-28T10:34:37Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com -c credential.helper= -c credential.helper=!gh auth git-credential push -u origin real-numbers-cast-to-45
+exit code 0
+branch 'real-numbers-cast-to-45' set up to track 'origin/real-numbers-cast-to-45'.
+remote: 
+remote: Create a pull request for 'real-numbers-cast-to-45' on GitHub by visiting:        
+remote:      https://github.com/bettersandeep/lekha/pull/new/real-numbers-cast-to-45        
+remote: 
+To https://github.com/bettersandeep/lekha.git
+ * [new branch]      real-numbers-cast-to-45 -> real-numbers-cast-to-45
+2026-11-28T10:34:40Z $ gh pr create -R bettersandeep/lekha --head real-numbers-cast-to-45 --base main --title Real numbers: CAST to REAL and AVG in SELECT without FROM --body-file /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/pr-body.md
+exit code 0
+https://github.com/bettersandeep/lekha/pull/56
+2026-11-28T10:34:40Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD
+exit code 0
+3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e
+2026-11-28T10:34:42Z wait for the review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e: Qodo has no review of this pull request. CI: pending
+2026-11-28T10:35:15Z wait for the review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e: the Qodo review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e has the status `started`. CI: success
+2026-11-28T10:35:47Z wait for the review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e: the Qodo review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e has the status `started`. CI: success
+2026-11-28T10:36:20Z wait for the review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e: the Qodo review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e has the status `started`. CI: success
+2026-11-28T10:36:52Z wait for the review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e: the Qodo review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e has the status `started`. CI: success
+2026-11-28T10:37:24Z review of 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e: 3 findings in the record, CI: success
+2026-11-28T10:37:24Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:37:24Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+acb32003dd6ac6bcf973889bfad47de925410077
+2026-11-28T10:37:24Z agent start 3: claude -p <prompt> --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/**) Read(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/input/**) Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/**) Bash(/Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/bin/yt *) --disallowedTools Edit(//Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/repo/.git/**) --permission-mode dontAsk --strict-mcp-config --safe-mode
+2026-11-28T10:38:28Z agent start 3: exit code 0
+2026-11-28T10:38:28Z $ git -c core.hooksPath=/dev/null add -A
+exit code 0
+2026-11-28T10:38:28Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+81571d4469a74577ae1de4bea955d6f6d2e89ef2
+2026-11-28T10:38:28Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com diff --name-status --no-renames acb32003dd6ac6bcf973889bfad47de925410077 81571d4469a74577ae1de4bea955d6f6d2e89ef2
+exit code 0
+M	src/lib.rs
+2026-11-28T10:38:28Z $ git -c core.hooksPath=/dev/null -c user.name=Sandeep Singh -c user.email=14184381+bettersandeep@users.noreply.github.com rev-parse HEAD
+exit code 0
+3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e
+2026-11-28T10:38:28Z $ git -c core.hooksPath=/dev/null reset -q --soft 3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e
+exit code 0
+2026-11-28T10:38:28Z $ git -c core.hooksPath=/dev/null read-tree -u --reset 81571d4469a74577ae1de4bea955d6f6d2e89ef2
+exit code 0
+2026-11-28T10:38:29Z $ git -c core.hooksPath=/dev/null clean -ffdxq
+exit code 0
+2026-11-28T10:38:29Z $ git -c core.hooksPath=/dev/null diff --quiet
+exit code 0
+2026-11-28T10:38:29Z $ git -c core.hooksPath=/dev/null write-tree
+exit code 0
+81571d4469a74577ae1de4bea955d6f6d2e89ef2
+2026-11-28T10:39:04Z $ qodo review --json --ticket https://github.com/bettersandeep/lekha/issues/45 --context-file /Users/sandeepsingh/.local/state/yantra/runs/real-numbers-cast-to-45-20261128T101941Z/local-review-context.json
+exit code 0
+{"findings":[],"finding_state":{"complete":true,"introduced":[],"resolved":[],"still_open":[],"dismissed":[]},"review_agent_comment":"Nothing to comment.","meta":{"analysis":{"attempted_mode":"incremental","baseline_checkpoint_id":"80c108ee8a8741fb83c0298fa192f436","mode":"incremental","profile_changed":false,"reason":"changes_since_checkpoint"},"checkpoint":{"base_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","coverage_started_at":"2026-11-28T10:33:03.993440+00:00","created_at":"2026-11-28T10:38:34.067201+00:00","id":"3ca07dab75b344b08fe04f2b458540e2","sequence":42717,"tree_sha":"81571d4469a74577ae1de4bea955d6f6d2e89ef2","version":1},"context":{"author_notes":{"input_chars":2054,"max_tokens":16000,"offloaded":false,"original_tokens":537,"outcome":"inline","rendered_chars":2224},"description":{"input_chars":69,"max_tokens":5000,"offloaded":false,"original_tokens":17,"outcome":"inline","rendered_chars":69},"ticket_bodies":[{"index":1,"input_chars":3933,"max_tokens":5000,"offloaded":false,"original_tokens":983,"outcome":"inline","rendered_chars":3933}]},"coverage":{"complete":true},"depth":"auto","org_config":"applied","reviewers":{"ran":["issue"],"skipped":["compliance","skills","spec","ui","persona","cross_repo"]},"run":{"effort":{"effective":"lite","requested":"auto"},"id":"2999db0a037244859725d15852c6ba3a","passes":[{"agent_statuses_reported":true,"agents":[{"duration_ms":20296,"models":["multi-provider/claude-haiku-5-5"],"name":"issue-review-agent-turbo","status":"completed"}],"duration_ms":25515,"effort":"lite","kind":"primary","started_at":"2026-11-28T10:38:38.048673+00:00"}],"snapshot":{"base_sha":"5c7adb10fcfc9defa27fec0ed4a7a09f9b6707c0","commit_sha":"3cd6d372ecfc5a83f1e42836e7c9d1484ff19e1e","tree_sha":"81571d4469a74577ae1de4bea955d6f6d2e89ef2"},"timing":{"duration_ms":29712,"finished_at":"2026-11-28T10:39:03.779322+00:00","started_at":"2026-11-28T10:38:34.067201+00:00"}},"safety_net":{"ran":false,"reinjected":0},"skipped_files":[]}}
+No verified PR target. Comparing against origin/main without a PR target for linking.
+Reviewing bettersandeep/lekha @ 5c7adb10f — 73195B of local changes · auto depth (base cloned by the reviewer)
+  trace 6f6828f059c14a8b08e00a7c53449004
+2026-11-28T10:39:04Z end state: needs-human. the Qodo local review did not run, or the runner cannot read its result: the local review does not list the earlier finding(s) 5015abac-6237-490d-9d88-71c23af53750 No verified PR target. Comparing against origin/main without a PR target for linking.
+Reviewing bettersandeep/lekha @ 5c7adb10f — 73195B of local changes · auto depth (base cloned by the reviewer)
+  trace 6f6828f059c14a8b08e00a7c53449004
