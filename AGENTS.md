@@ -52,14 +52,14 @@ docker run --rm --network none -v "$PWD":/src:ro rust:1.96.1 sh -c 'cp -r /src /
 - Scope: `Cargo.toml`, `Cargo.lock`, `src/**`.
 - Rule: no dependency, no `unsafe`, and no call to an external program or library.
 - Reason: the fastest way to pass each test is to link SQLite and hand it the query. That gives a full score and builds nothing.
-- Check: `#![forbid(unsafe_code)]` in the crate, and a CI step that fails when `Cargo.lock` has more than one package.
+- Check: `ci/guard.sh` fails when `Cargo.lock` has more than one package, and the cargo commands in CI use `--locked`, so a dependency that is only in `Cargo.toml` stops the build. The crate forbids `unsafe` code.
 
 ### 3. The test data is not yours to change
 
 - Scope: `tests/slt/**/*.test`, `tests/slt/SHA256SUMS`, `tests/slt.rs`.
 - Rule: a ticket for the engine does not edit a test file, the checksum file or the harness. If the harness is wrong, that is a separate ticket.
 - Reason: the score is the one number that this project trusts. A change that raises the score by a change to the thing that measures it is worse than no change.
-- Check: a CI step compares each test file with its checksum in `tests/slt/SHA256SUMS`, and fails when a test file is not in that list. A change to the harness has no automatic check yet.
+- Check: `ci/guard.sh` compares the list of test files with the list in `tests/slt/SHA256SUMS`, path by path, and each file with its checksum. In a pull request it also fails when one change touches the engine (`src/`, `Cargo.toml`, `Cargo.lock`) and the things that measure it (`tests/slt/` but not the baseline, `tests/slt.rs`, `.github/`, `ci/`). A pull request that changes only the measuring side is not stopped by a check. A person reads those.
 
 ### 4. The baseline is the measured number
 

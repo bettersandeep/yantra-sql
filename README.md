@@ -68,4 +68,5 @@ Score: 4577 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 `AGENTS.md` has the rules for the agents, and each rule says which check enforces it.
 `tests/slt/FORMAT.wiki` is the format document of sqllogictest, copied without change from the same source as the test file.
-`tests/slt/SHA256SUMS` has the checksum of each test file, and CI fails when a test file differs from it.
+`tests/slt/SHA256SUMS` has the checksum of each test file.
+`ci/guard.sh` runs in CI before the build and checks the test data, the dependencies, and that a pull request does not change the engine and its measure in one change.

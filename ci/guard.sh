@@ -1,0 +1,41 @@
+#!/bin/sh
+# Checks that protect the score. CI runs this before the build.
+set -eu
+cd "$(dirname "$0")/.."
+tmp=$(mktemp -d)
+
+# 1. The manifest lists each test file and nothing else, and each file
+#    matches its checksum. A count is not enough: the paths are compared.
+(
+	cd tests/slt
+	find . -name '*.test' | sed 's|^\./||' | LC_ALL=C sort >"$tmp/files"
+	cut -c67- SHA256SUMS | LC_ALL=C sort >"$tmp/listed"
+	if ! diff "$tmp/files" "$tmp/listed"; then
+		echo "guard: the test files and SHA256SUMS do not list the same paths" >&2
+		exit 1
+	fi
+	sha256sum -c --quiet SHA256SUMS
+)
+
+# 2. No dependency. The lock file has one package. The cargo commands in CI
+#    use --locked, so a dependency in Cargo.toml that is not in the lock file
+#    stops the build.
+if [ "$(grep -c '^\[\[package\]\]' Cargo.lock)" -ne 1 ]; then
+	echo "guard: Cargo.lock has more than one package" >&2
+	exit 1
+fi
+
+# 3. In a pull request, a change to the engine and a change to the things
+#    that measure it do not go together. Check 1 alone cannot stop a pull
+#    request that edits a test file and its checksum in one change.
+if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+	changed=$(git -c core.quotePath=false diff --name-only "origin/${GITHUB_BASE_REF}...HEAD")
+	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$)' || true)
+	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/)' | grep -v '^tests/slt/baseline\.txt$' || true)
+	if [ -n "$engine" ] && [ -n "$measure" ]; then
+		echo "guard: this pull request changes the engine and the things that measure it" >&2
+		printf 'engine:\n%s\nmeasure:\n%s\n' "$engine" "$measure" >&2
+		exit 1
+	fi
+fi
+echo "guard: ok"
