@@ -42,7 +42,8 @@ impl Database {
 
     /// Runs one SQL statement and returns its result rows.
     /// Returns an error for each statement that it does not support.
-    /// The only supported statement is `SELECT` without `FROM`, with integer arithmetic.
+    /// The only supported statement is `SELECT` without `FROM`.
+    /// `README.md` lists the supported expressions.
     pub fn execute(&mut self, sql: &str) -> Result<Vec<Vec<Value>>, Error> {
         Ok(vec![select::select(sql)?])
     }

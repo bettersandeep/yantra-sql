@@ -2,6 +2,9 @@
 //!
 //! The parser computes each value while it reads the tokens.
 //! `None` is the SQL NULL.
+//! Each function argument is computed, so an error in an argument is an error for the statement.
+//! SQLite 3.49.1 does not compute the arguments of `COALESCE` after the first one that is not NULL:
+//! `SELECT COALESCE(1, abs(-9223372036854775807 - 1))` gives 1 there and an error here.
 
 use crate::lexer::{Token, lex};
 use crate::{Error, Value};
@@ -34,6 +37,14 @@ const KEYWORDS: [&str; 147] = [
 /// Deeper input is an error and not a stack overflow.
 /// SQLite permits a depth of 1000. Raise the limit if real queries need it.
 const MAX_DEPTH: usize = 100;
+
+/// ponytail: a fixed limit on the tokens of one statement.
+/// SQLite 3.49.1 gives an error for an expression tree that is more than 1000 levels deep,
+/// for a function call with more than 1000 arguments and for a result of more than 2000 columns.
+/// Each level, each argument and each column needs a token.
+/// Thus a statement within this limit is within those three limits.
+/// Count the three limits one by one if real queries need longer statements.
+const MAX_TOKENS: usize = 1000;
 
 fn overflow() -> Error {
     Error("integer overflow".to_string())
@@ -109,7 +120,9 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// `+ unary`, `- unary`, an integer literal or `( expr )`.
+    /// `+ unary`, `- unary`, an integer literal, `NULL`, `( expr )`,
+    /// `COALESCE ( expr , expr {, expr} )` or `NULLIF ( expr , expr )`.
+    /// The two functions are from https://www.sqlite.org/lang_corefunc.html.
     /// Each recursion of the parser goes through this function.
     fn unary(&mut self) -> Result<Option<i64>, Error> {
         if self.depth == MAX_DEPTH {
@@ -131,6 +144,46 @@ impl<'a> Parser<'a> {
             Some(Token::Integer(v)) => {
                 self.pos += 1;
                 Some(v)
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
+                self.pos += 1;
+                None
+            }
+            Some(Token::Word(name)) if self.tokens.get(self.pos + 1) == Some(&Token::LeftParen) => {
+                let coalesce = name.eq_ignore_ascii_case("COALESCE");
+                if !coalesce && !name.eq_ignore_ascii_case("NULLIF") {
+                    return Err(self.unexpected());
+                }
+                self.pos += 2;
+                let mut args = Vec::new();
+                loop {
+                    args.push(self.expr()?);
+                    match self.peek() {
+                        Some(Token::Comma) => self.pos += 1,
+                        Some(Token::RightParen) => break,
+                        _ => return Err(self.unexpected()),
+                    }
+                }
+                self.pos += 1;
+                match args[..] {
+                    // The first argument that is not NULL, or NULL.
+                    [_, _, ..] if coalesce => args.iter().find_map(|arg| *arg),
+                    // NULL if the arguments are the same, else the first argument.
+                    // If `a` is NULL, the two branches give the same result.
+                    // If only `b` is NULL, the arguments are different.
+                    [a, b] if !coalesce => {
+                        if a == b {
+                            None
+                        } else {
+                            a
+                        }
+                    }
+                    _ => {
+                        return Err(Error(format!(
+                            "wrong number of arguments to function {name}"
+                        )));
+                    }
+                }
             }
             Some(Token::LeftParen) => {
                 self.pos += 1;
@@ -157,6 +210,9 @@ pub fn select(sql: &str) -> Result<Vec<Value>, Error> {
         pos: 0,
         depth: 0,
     };
+    if parser.tokens.len() > MAX_TOKENS {
+        return Err(Error("the statement has too many tokens".to_string()));
+    }
     if !parser.keyword("SELECT") {
         return Err(parser.unexpected());
     }
@@ -250,6 +306,162 @@ mod tests {
     }
 
     #[test]
+    fn null_literal_and_arithmetic() {
+        assert_eq!(
+            run(
+                "SELECT NULL, null, Null, - NULL, + NULL, - - nULL, (NULL), NULL + 1, 1 - NULL, \
+                 NULL * 0, NULL / 0, 0 % NULL, NULL % NULL, 2 * (3 + NULL), NULL AS a, NULL b"
+            ),
+            [const { Value::Null }; 16]
+        );
+        for sql in [
+            "SELECT NULL NULL",
+            "SELECT 1 NULL",
+            "SELECT 1 AS NULL",
+            "SELECT NULL(1)",
+            "SELECT NULL 1",
+            // SQLite gives NULL. The overflow is a real number there.
+            "SELECT NULL + (9223372036854775807 + 1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
+    #[test]
+    fn coalesce_returns_the_first_value_that_is_not_null() {
+        assert_eq!(
+            run(
+                "SELECT COALESCE(NULL, 2), COALESCE(1, 2), COALESCE(0, 1), COALESCE(NULL, NULL, 3), \
+                 COALESCE(1 / 0, 7 % 0, - 9, 4), COALESCE(NULL, COALESCE(NULL, 5), 6)"
+            ),
+            ints(&[2, 1, 0, 3, -9, 5])
+        );
+        assert_eq!(
+            run(
+                "SELECT COALESCE(NULL, NULL), COALESCE(NULL, 1 / 0, - NULL), 1 + COALESCE(NULL, NULL)"
+            ),
+            [Value::Null, Value::Null, Value::Null]
+        );
+        assert_eq!(
+            run("SELECT - COALESCE(NULL, 5) * 2, COALESCE(1, 2) + NULLIF(3, 4) x"),
+            ints(&[-10, 4])
+        );
+    }
+
+    #[test]
+    fn nullif_compares_its_two_arguments() {
+        assert_eq!(
+            run(
+                "SELECT NULLIF(1, 2), NULLIF(1, NULL), NULLIF(0, NULL), NULLIF(0, 1 / 0), \
+                 NULLIF(-1, 1), NULLIF(COALESCE(NULL, 2), 3)"
+            ),
+            ints(&[1, 1, 0, 0, -1, 2])
+        );
+        assert_eq!(
+            run(
+                "SELECT NULLIF(1, 1), NULLIF(NULL, 1), NULLIF(NULL, NULL), NULLIF(1 / 0, 1 / 0), \
+                 NULLIF(2, 1 + 1), NULLIF(-0, 0), 3 + NULLIF(4, 4), NULLIF(COALESCE(NULL, 2), 2)"
+            ),
+            [const { Value::Null }; 8]
+        );
+    }
+
+    #[test]
+    fn function_names_ignore_case_and_white_space() {
+        assert_eq!(
+            run(
+                "SELECT coalesce(NULL, 1), CoAlEsCe (NULL, 2), COALESCE\t\r\n  (\nNULL ,3 ), \
+                 nullif(4, 5), NuLlIf (5, 6), NULLIF\n(\t6 , 7\n)"
+            ),
+            ints(&[1, 2, 3, 4, 5, 6])
+        );
+        // The two names are not keywords, so each one can be an alias.
+        assert_eq!(run("SELECT 1 coalesce, 2 AS nullif"), ints(&[1, 2]));
+        for sql in [
+            "SELECT coalesce",
+            "SELECT nullif",
+            "SELECT 1 coalesce(2, 3)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
+    #[test]
+    fn wrong_argument_count_is_an_error() {
+        for sql in [
+            "SELECT COALESCE()",
+            "SELECT COALESCE(1)",
+            "SELECT COALESCE(NULL)",
+            "SELECT NULLIF()",
+            "SELECT NULLIF(1)",
+            "SELECT NULLIF(1, 2, 3)",
+            "SELECT NULLIF(NULL, NULL, NULL)",
+            "SELECT COALESCE(1, NULLIF(1))",
+            "SELECT 1, COALESCE(2)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT nullif(1)").unwrap_err().to_string(),
+            "wrong number of arguments to function nullif"
+        );
+    }
+
+    #[test]
+    fn error_in_an_argument_is_an_error() {
+        for sql in [
+            // SQLite gives 1 for the first three. It does not compute the second argument.
+            "SELECT COALESCE(1, 9223372036854775807 + 1)",
+            "SELECT COALESCE(1, abs(1))",
+            "SELECT COALESCE(1, 2, COALESCE(3))",
+            "SELECT COALESCE(1, x)",
+            "SELECT COALESCE(1, 'a')",
+            "SELECT COALESCE(9223372036854775807 + 1, 1)",
+            "SELECT NULLIF(1, 9223372036854775807 + 1)",
+            "SELECT NULLIF(NULL, - (-9223372036854775807 - 1))",
+            "SELECT NULLIF(1, 1 +)",
+            "SELECT COALESCE(1, 2,)",
+            "SELECT COALESCE(, 1, 2)",
+            "SELECT COALESCE(1 2)",
+            "SELECT COALESCE(1, 2",
+            "SELECT COALESCE(1, 2))",
+            "SELECT COALESCE(1 AS a, 2)",
+            "SELECT COALESCE(*)",
+            "SELECT COALESCE((1, 2), 3)",
+            // SQLite gives 1 for the next two.
+            "SELECT COALESCE(DISTINCT 1, 2)",
+            "SELECT COALESCE(ALL 1, 2)",
+            "SELECT COALESCE(1, 2) FILTER (WHERE 1)",
+            "SELECT COALESCE(1, 2) OVER ()",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
+    #[test]
+    fn each_other_function_is_an_error() {
+        for sql in [
+            "SELECT abs(1)",
+            "SELECT ifnull(NULL, 2)",
+            "SELECT max(1, 2)",
+            "SELECT iif(1, 2, 3)",
+            "SELECT coalesce2(1, 2)",
+            "SELECT nullifx(1, 2)",
+            "SELECT null_if(1, 2)",
+            "SELECT COUNT(*)",
+            "SELECT CAST(NULL AS INTEGER)",
+            "SELECT COALESCE(NULL, ifnull(NULL, 2))",
+            "SELECT main.coalesce(1, 2)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT abs (1)").unwrap_err().to_string(),
+            "unsupported syntax at Word(\"abs\")"
+        );
+    }
+
+    #[test]
     fn select_list_keywords_and_aliases() {
         assert_eq!(run("select all 1 AS a, 2 b ,3"), ints(&[1, 2, 3]));
         assert_eq!(run("SeLeCt DiStInCt 1 aS col0, 1 _x9"), ints(&[1, 1]));
@@ -312,7 +524,6 @@ mod tests {
             "SELECT 1 LIMIT 1",
             "SELECT 1; SELECT 2",
             "SELECT 1;",
-            "SELECT NULL",
             "SELECT 'a'",
             "SELECT 1.5",
             "SELECT 1e5",
@@ -355,5 +566,24 @@ mod tests {
             ints(&[-1])
         );
         assert!(select(&format!("SELECT {}1", "- ".repeat(100_000))).is_err());
+        let calls = |depth: usize| {
+            let (open, close) = ("COALESCE(NULL, ".repeat(depth), ")".repeat(depth));
+            format!("SELECT {open}7{close}")
+        };
+        assert_eq!(run(&calls(MAX_DEPTH - 1)), ints(&[7]));
+        assert!(select(&calls(MAX_DEPTH)).is_err());
+    }
+
+    #[test]
+    fn long_statement_is_an_error() {
+        // `SELECT` and n items with n - 1 commas are 2 * n tokens.
+        let items = |n: usize| format!("SELECT {}", vec!["1"; n].join(", "));
+        assert_eq!(run(&items(MAX_TOKENS / 2)), ints(&vec![1; MAX_TOKENS / 2]));
+        assert!(select(&items(MAX_TOKENS / 2).replace("SELECT", "SELECT +")).is_err());
+        // SQLite gives an error for each of these: 1001 arguments, 1001 terms, 2001 columns.
+        let nulls = vec!["NULL"; 1001].join(", ");
+        assert!(select(&format!("SELECT COALESCE({nulls})")).is_err());
+        assert!(select(&format!("SELECT {}", vec!["1"; 1001].join(" + "))).is_err());
+        assert!(select(&items(2001)).is_err());
     }
 }
