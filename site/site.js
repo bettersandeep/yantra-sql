@@ -125,12 +125,14 @@ function show(answer, note) {
 }
 
 // Runs the SQL in the engine of the browser.
+// Returns true when this run was still the newest one at its end, and so showed its answer.
 async function run() {
   const number = ++newest;
   const answer = await execute(sql.value);
   // An older run that ends late does not replace the answer of a newer run.
-  if (number !== newest) return;
+  if (number !== newest) return false;
   show(answer);
+  return true;
 }
 
 // Runs the SQL in the engine on the Raspberry Pi. Only the button "Ask the Pi" calls this.
@@ -193,10 +195,12 @@ fetch("score.json")
 
 // On load, the page runs the SQL in the box.
 // A test hook: each ?q=<sql> in the URL runs on load, in order.
+// A run or a request to the Pi that the visitor starts ends this loop,
+// so a later query of the link does not replace the visitor's SQL or answer.
 (async () => {
   const queries = new URLSearchParams(location.search).getAll("q");
   for (const query of queries.length ? queries : [sql.value]) {
     sql.value = query;
-    await run();
+    if (!(await run())) break;
   }
 })();
