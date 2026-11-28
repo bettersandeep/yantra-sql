@@ -1,6 +1,6 @@
 [package]
-name = "yantra-sql"
+name = "lekha"
 version = "0.0.0"
 edition = "2024"
 license = "MIT"
-description = "A SQL database that gives the same answers as SQLite, with Parquet storage."
+description = "A small SQL database that gives the same answers as SQLite."

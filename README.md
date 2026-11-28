@@ -1,20 +1,26 @@
-# yantra-sql
+# lekha
 
-A SQL database that gives the same answers as SQLite, with Parquet storage.
+A small SQL database that gives the same answers as SQLite.
+"Lekha" is Sanskrit for a written record.
 
 AI coding agents write this code.
-The [yantra](https://github.com/bettersandeep/yantra) factory gives them the work, checks each change, and decides what merges.
+SQLite's public test suite scores it, and Qodo reviews each change before it merges.
+
+This repo is an entry in the Qodo Software Factory Hackathon.
+It holds two things: the database, and the factory around it.
+The factory is the working process that takes a ticket to a reviewed pull request: the tickets, the rules for the agents, the checks, the review and the gates.
+The parts of the factory are added to this repo one at a time.
 
 ## Rule of this repo
 
 The first commit is a seed made by hand: an empty crate, CI and the licence.
-Each change after the seed arrives as a pull request from the factory.
+Each change after the seed arrives as a pull request with a Qodo review.
 
 ## Design decisions
 
-- Language: Rust.
+- Language: Rust, with no dependencies.
 - Answers: the same as SQLite, checked with SQLite's public test suite.
-- Storage: Parquet files, with a small row area for new and changed rows.
+- When the engine does not support an input, it returns an error. It never returns a guessed value.
 
 ## Tests
 
