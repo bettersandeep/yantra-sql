@@ -54,7 +54,7 @@ The author offers GPL, BSD, MIT or CC0, and this repo uses the file under MIT.
 
 The engine runs `SELECT [ALL | DISTINCT] <item> {, <item>}` without `FROM`.
 An item is an expression with an optional alias.
-An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, the comparisons `= == <> != < <= > >=`, `IS NULL`, `IS NOT NULL`, `NOT`, `AND`, `OR`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM` and `CAST(<expr> AS INTEGER)`.
+An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, the comparisons `= == <> != < <= > >=`, `IS NULL`, `IS NOT NULL`, `NOT`, `AND`, `OR`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM`, `CAST(<expr> AS INTEGER)` and `CASE`.
 The precedence of the operators is the table in section 2 of https://www.sqlite.org/lang_expr.html, and operators of one row group from left to right.
 A comparison gives 1 or 0, and NULL when an operand is NULL.
 `IS NULL` and `IS NOT NULL` give 1 or 0.
@@ -82,10 +82,17 @@ Function names are case-insensitive.
 `CAST`, `AS` and `INTEGER` are case-insensitive.
 A `CAST` to each other type is an error, and so is a `CAST` with no type.
 The engine computes each argument of a function, so an error in an argument is an error for the statement.
+`CASE WHEN <cond> THEN <result> {WHEN <cond> THEN <result>} [ELSE <result>] END` gives the result of the first `WHEN` whose condition is true, which means not 0 and not NULL.
+`CASE <base> WHEN <value> THEN <result> {WHEN <value> THEN <result>} [ELSE <result>] END` gives the result of the first `WHEN` whose value equals the base, and a NULL base or a NULL value never matches.
+With no match, a `CASE` gives the `ELSE` result, or NULL when there is no `ELSE`.
+The rules are from section 7 of https://www.sqlite.org/lang_expr.html.
+The keywords of a `CASE` are case-insensitive.
+A `CASE` with no `WHEN`, a `WHEN` with no `THEN` and a missing `END` are errors.
+The engine computes each part of a `CASE`, so an error in a part that SQLite does not compute is an error for the statement.
 The engine returns an error for each other statement, expression or function, for a wrong number of arguments and for integer overflow.
 A SQLite keyword is not accepted as an alias.
 An expression that is nested more than 100 levels deep is an error.
-Score: 8995 of 10012 records pass in `random/expr/slt_good_0.test`.
+Score: 9644 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 ## Rules and checks
 
