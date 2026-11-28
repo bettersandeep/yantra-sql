@@ -399,7 +399,7 @@ def check_local_state(review, seen=None):
     """ValueError when the lists of ids of a local review do not agree with its list `findings`.
 
     review: a result whose findings passed sort_findings.
-    seen: the findings at the threshold of the earlier local reviews of the run, id to last status.
+    seen: the findings at the threshold of the earlier local reviews of the run, id to the finding as it was last seen.
     An id that `finding_state` calls open, or that the review before had as open, must be in `findings`.
     If not, the runner cannot tell if that finding is open, so it never reads as clean or as fixed.
     A finding that an earlier review closed can be absent: Qodo leaves it out of a later incremental result.
@@ -412,7 +412,7 @@ def check_local_state(review, seen=None):
         for one in ids:
             if not isinstance(one, str) or status.get(one) not in OPEN_STATUS:
                 raise ValueError("`finding_state.%s` has the id %r, and `findings` has no open finding with it" % (name, one))
-    lost = sorted(one for one, last in (seen or {}).items() if last in OPEN_STATUS and one not in status)
+    lost = sorted(one for one, last in (seen or {}).items() if last["attribution_status"] in OPEN_STATUS and one not in status)
     if lost:
         raise ValueError("the local review does not list the finding(s) %s, which the review before had as open" % ", ".join(lost))
 
@@ -433,12 +433,18 @@ def local_context(issue, criteria, recent_work=()):
 def local_summary(seen, review):
     """The lines about the local review for the pull request body and the handoff comment.
 
-    seen: the findings at the threshold in the local reviews of this run, id to last status. review: the last result.
+    seen: the findings at the threshold in the local reviews of this run, id to the finding as it was last seen.
+    review: the last result.
     Only a finding that Qodo closed as implemented counts as fixed. Each other closed one keeps the word of Qodo.
     """
     blocking, flagged, dismissed, _ = sort_findings(review)
+    # A finding that was dismissed in an earlier review can be absent from the last one. A person still needs its title.
+    listed = {finding["id"] for finding in review["findings"]}
+    dismissed = dismissed + [
+        finding for finding in seen.values() if finding["attribution_status"] == "dismissed" and finding["id"] not in listed
+    ]
     words = {}
-    for status in seen.values():
+    for status in (finding["attribution_status"] for finding in seen.values()):
         word = "open" if status in OPEN_STATUS else "fixed" if status in FIXED_STATUS else status
         words[word] = words.get(word, 0) + 1
     line = "Local review before the commit: %d findings, %d fixed, %d open" % (
@@ -906,7 +912,7 @@ class Run:
         self.old = self.new = self.applicable = None
         self.commits = 0
         self.local_reviews = 0  # the local reviews that ran
-        self.local_seen = {}  # the findings at the threshold in the local reviews of this run: id to last status
+        self.local_seen = {}  # the findings at the threshold in the local reviews of this run: id to the finding as last seen
         self.local_last = None  # the result of the last local review that ran
         self.base_tree = None  # the git tree of origin/main
         self.flagged = []  # open informational findings of the last review: listed, not fixed
@@ -1208,10 +1214,10 @@ class Run:
                 f.write(out)
         except OSError as error:
             self.log("the result of the local review was not saved: %s" % error)
-        for finding in review["findings"]:  # the last status of each finding that an earlier review had
+        for finding in review["findings"]:  # the newest form of each finding that an earlier review had
             if finding["id"] in self.local_seen:
-                self.local_seen[finding["id"]] = finding["attribution_status"]
-        self.local_seen.update((finding["id"], finding["attribution_status"]) for finding in blocking)
+                self.local_seen[finding["id"]] = finding
+        self.local_seen.update((finding["id"], finding) for finding in blocking)
         self.local_last = review
         self.log(
             "local review %d: %d seconds, %d findings in the result, %d open at the threshold, "

@@ -1093,6 +1093,12 @@ def answer(name, **change):
     return (0, json.dumps(local(name, **change)) if change else fixture(name), "")
 
 
+def kept(status, name="local-review-findings.json"):
+    """What the runner keeps of the finding of a real answer: id to the finding, here with the given status."""
+    finding = dict(local(name)["findings"][0], attribution_status=status)
+    return {finding["id"]: finding}
+
+
 MODULO = "a637e811-d3f3-46a2-8d13-85ccabfe342b"  # the finding in local-review-findings.json
 HELPER = "8dc309fe-a288-4498-aa99-851d14c7f52c"  # the finding in local-review-new-file.json
 
@@ -1162,12 +1168,12 @@ class LocalReviewTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=str(review["finding_state"])):
                 runner.check_local_state(review)
         # a finding that the review before had as open must be in the next result
-        runner.check_local_state(local("local-review-fixed.json"), {MODULO: "pending"})
+        runner.check_local_state(local("local-review-fixed.json"), kept("pending"))
         with self.assertRaises(ValueError) as stop:
-            runner.check_local_state(local("local-review-clean.json"), {MODULO: "pending"})
+            runner.check_local_state(local("local-review-clean.json"), kept("pending"))
         self.assertIn("does not list the finding(s) " + MODULO, str(stop.exception))
         # a finding that an earlier review closed can be absent later
-        runner.check_local_state(local("local-review-clean.json"), {MODULO: "implemented"})
+        runner.check_local_state(local("local-review-clean.json"), kept("implemented"))
 
     def test_the_command_and_the_context(self):
         url = "https://github.com/bettersandeep/lekha/issues/24"
@@ -1187,21 +1193,21 @@ class LocalReviewTest(unittest.TestCase):
     def test_only_an_implemented_finding_counts_as_fixed(self):
         summary = runner.local_summary
         self.assertEqual(summary({}, local("local-review-clean.json")), [self.LINE % (0, 0, 0)])
-        self.assertEqual(summary({MODULO: "implemented"}, local("local-review-fixed.json")), [self.LINE % (1, 1, 0)])  # real: implemented
+        self.assertEqual(summary(kept("implemented"), local("local-review-fixed.json")), [self.LINE % (1, 1, 0)])  # real: implemented
         # real: the code of the finding went away. That is not "fixed".
-        self.assertEqual(summary({HELPER: "outdated"}, local("local-review-clean.json")), [self.LINE % (1, 0, 0) + ", 1 outdated"])
-        lines = summary({MODULO: "pending"}, local("local-review-still-open.json"))
+        self.assertEqual(summary(kept("outdated", "local-review-new-file.json"), local("local-review-clean.json")), [self.LINE % (1, 0, 0) + ", 1 outdated"])
+        lines = summary(kept("pending"), local("local-review-still-open.json"))
         self.assertEqual(lines[:3], [self.LINE % (1, 0, 1), "", "Open after the local review:"])
         self.assertIn("```text\n- Modulo by zero crashes instead of returning NULL (action_required, src/select.rs", lines[4])
         # HAND-MADE from the real result: Qodo has no dismissed local finding in the saved answers
-        lines = summary({MODULO: "dismissed"}, local("local-review-fixed.json", attribution_status="dismissed"))
+        lines = summary(kept("dismissed"), local("local-review-fixed.json", attribution_status="dismissed"))
         self.assertEqual(lines[0], self.LINE % (1, 0, 0) + ", 1 dismissed")
         self.assertEqual(lines[2], "Findings of the local review with the status `dismissed`. They were closed without a fix:")
         self.assertIn("- Modulo by zero crashes instead of returning NULL", lines[4])
         for status in ("detected_after_merge", "outdated"):
-            lines = summary({MODULO: status}, local("local-review-fixed.json", attribution_status=status))
+            lines = summary(kept(status), local("local-review-fixed.json", attribution_status=status))
             self.assertEqual(lines, [self.LINE % (1, 0, 0) + ", 1 " + status])
-        self.assertEqual(summary({MODULO: "full_implementation"}, local("local-review-fixed.json", attribution_status="full_implementation"))[0],
+        self.assertEqual(summary(kept("full_implementation"), local("local-review-fixed.json", attribution_status="full_implementation"))[0],
                          self.LINE % (1, 1, 0))
 
     def test_an_open_informational_local_finding_is_listed(self):
@@ -1361,6 +1367,13 @@ class LocalFlowTest(unittest.TestCase):
         self.assertIn("is not committed", note)
         for part in (self.LINE % (1, 0, 1), "Open after the local review:\n\n```text\n- Modulo by zero crashes"):
             self.assertIn(part, self.comments[-1])
+
+    def test_a_dismissed_local_finding_keeps_its_title_when_a_later_review_leaves_it_out(self):
+        # HAND-MADE: the real finding with the status `dismissed`, and then the real clean answer, which does not list it
+        lines = runner.local_summary(kept("dismissed"), local("local-review-run45-3-after-commit.json"))
+        self.assertEqual(lines[0], self.LINE % (1, 0, 0) + ", 1 dismissed")
+        self.assertEqual(lines[2], "Findings of the local review with the status `dismissed`. They were closed without a fix:")
+        self.assertIn("- Modulo by zero crashes instead of returning NULL", lines[4])
 
     def test_a_closed_local_finding_can_be_absent_after_the_commit(self):
         # The three real answers of the third run of ticket 45: found, fixed, and after the commit a
