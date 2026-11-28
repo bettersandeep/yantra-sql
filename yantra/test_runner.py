@@ -5,6 +5,8 @@ Run: python3 -m unittest discover -s yantra -p 'test_*.py'
 import contextlib
 import io
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -212,6 +214,7 @@ class TextTest(unittest.TestCase):
                 "Read(//state/runs/t/repo/**)",
                 "Read(//state/runs/t/input/**)",
                 "Edit(//state/runs/t/repo/**)",
+                "Bash(../bin/yt *)",
                 "Bash(/state/runs/t/bin/yt *)",
             ],
         )
@@ -223,10 +226,33 @@ class TextTest(unittest.TestCase):
         for word in ("docker", "git ", "ls", "cat", "Write(", "Glob", "Grep"):
             self.assertNotIn(word, rules)
 
+    def test_a_state_directory_with_a_space(self):
+        run_dir = "/Users/x/Library/Application Support/yantra/runs/t"
+        command = runner.agent_command("<prompt>", run_dir + "/repo", run_dir)
+        self.assertEqual(len(command), 17)  # each rule is one argument, with its space inside
+        for rule in (
+            "Read(//Users/x/Library/Application Support/yantra/runs/t/repo/**)",
+            "Read(//Users/x/Library/Application Support/yantra/runs/t/input/**)",
+            "Edit(//Users/x/Library/Application Support/yantra/runs/t/repo/**)",
+            "Edit(//Users/x/Library/Application Support/yantra/runs/t/repo/.git/**)",
+            "Bash(../bin/yt *)",  # the text of this call has no space
+            "Bash('/Users/x/Library/Application Support/yantra/runs/t/bin/yt' *)",
+        ):
+            self.assertIn(rule, command)
+        prompt = runner.build_prompt("the brief", run_dir, issue())
+        self.assertIn("`../bin/yt check`", prompt)
+        self.assertIn("`'/Users/x/Library/Application Support/yantra/runs/t/bin/yt' check`", prompt)
+
+    def test_the_default_state_is_not_a_cache_folder(self):
+        self.assertNotIn("Caches", runner.STATE_DEFAULT)
+        wanted = "~/.local/state/yantra"
+        self.assertEqual(runner.STATE_DEFAULT, wanted)
+
     def test_prompt(self):
         prompt = runner.build_prompt("the brief", "/run", issue(), runner.review_text("/run/input/review-1.md"))
         self.assertTrue(prompt.startswith("the brief\n"))
-        self.assertIn("`/run/bin/yt`", prompt)
+        self.assertIn("`../bin/yt check`", prompt)
+        self.assertIn("`/run/bin/yt check`", prompt)
         self.assertIn("`/run/input/`", prompt)
         self.assertIn("Title: t\nURL: u\n", prompt)
         self.assertIn("`/run/input/review-1.md`", prompt)
@@ -242,12 +268,16 @@ echo "git[$GIT_CONFIG_GLOBAL $GIT_CONFIG_SYSTEM] $*" >> "$YT_TEST_LOG"
 
 
 class YtTest(unittest.TestCase):
-    """The generated wrapper, with a fake docker and a fake git on the PATH."""
+    """The generated wrapper, with a fake docker and a fake git on the PATH.
+
+    The run directory has a space, as the state directory of macOS has.
+    """
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = os.path.realpath(tmp.name)
+        self.root = os.path.join(os.path.realpath(tmp.name), "Application Support", "t")
+        os.makedirs(self.root)
         self.clone = os.path.join(self.root, "repo")
         self.log = os.path.join(self.root, "log")
         os.makedirs(os.path.join(self.clone, "sub"))
@@ -261,14 +291,24 @@ class YtTest(unittest.TestCase):
             with open(os.path.join(self.root, path), "w", encoding="utf-8") as f:
                 f.write("SELECT 1\n")
         os.symlink(os.path.join(self.root, "outside.sql"), os.path.join(self.clone, "link.sql"))
+        self.call = runner.yt_calls(self.root)[0]
+
+    def test_both_call_texts_start_the_wrapper(self):
+        short, full = runner.yt_calls(self.root)
+        self.assertEqual(short, "../bin/yt")
+        self.assertIn(" ", self.root)
+        for self.call in (short, full):
+            self.assertEqual(self.yt("status")[0], 0)
+            self.assertEqual(self.yt("bogus")[0], 2)
 
     def yt(self, *args, **env):
         """Return (exit code, stderr, the docker and git calls)."""
         if os.path.exists(self.log):
             os.remove(self.log)
         env.update(PATH=os.path.join(self.root, "bin") + ":/usr/bin:/bin", YT_TEST_LOG=self.log)
-        yt = os.path.join(self.root, "bin", "yt")
-        done = subprocess.run([yt] + list(args), cwd=self.clone, env=env, capture_output=True, encoding="utf-8")
+        # The call goes through a shell, with the text that the agent gets.
+        call = " ".join([self.call] + [shlex.quote(arg) for arg in args])
+        done = subprocess.run(["sh", "-c", call], cwd=self.clone, env=env, capture_output=True, encoding="utf-8")
         calls = []
         if os.path.exists(self.log):
             with open(self.log, encoding="utf-8") as f:
@@ -445,6 +485,190 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(code, 3)
         with open(os.path.join(run.dir, "HANDOFF_FAILED"), encoding="utf-8") as f:
             self.assertIn("the removal of `agent-working`", f.read())
+
+
+FAKE_TOOL = """#!/bin/sh
+echo "$(basename "$0") $*" >> "$YT_TEST_LOG"
+if [ "$1 $2" = "image inspect" ] && [ "$3" = "${YT_TEST_MISSING:-}" ]; then exit 1; fi
+"""
+
+
+class StartTest(unittest.TestCase):
+    """The preconditions, with a fake gh, docker and claude on the PATH."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.log = os.path.join(tmp.name, "log")
+        for name in ("gh", "docker", "claude"):
+            path = os.path.join(tmp.name, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(FAKE_TOOL)
+            os.chmod(path, 0o755)
+        old = dict(os.environ)
+        self.addCleanup(os.environ.update, old)
+        self.addCleanup(os.environ.clear)
+        os.environ.update(PATH=tmp.name + ":/usr/bin:/bin", YT_TEST_LOG=self.log)
+        os.environ.pop("YT_TEST_MISSING", None)
+
+    def calls(self):
+        with open(self.log, encoding="utf-8") as f:
+            return f.read().splitlines()
+
+    def test_each_image_is_there(self):
+        self.assertEqual(runner.preconditions(), [])
+        self.assertIn("docker image inspect " + runner.RUST_IMAGE, self.calls())
+        self.assertIn("docker image inspect " + runner.GUARD_IMAGE, self.calls())
+
+    def test_a_missing_image_stops_the_run_before_a_write(self):
+        for image in (runner.RUST_IMAGE, runner.GUARD_IMAGE):
+            os.environ["YT_TEST_MISSING"] = image
+            if os.path.exists(self.log):
+                os.remove(self.log)
+            self.assertEqual(runner.preconditions(), ["the Docker image `%s` is not on this machine" % image])
+            printed = io.StringIO()
+            with contextlib.redirect_stderr(printed):
+                self.assertEqual(runner.run_ticket(18), 2)
+            self.assertIn(image, printed.getvalue())
+            # gh was asked for the login only: no issue read, no label, no comment.
+            self.assertEqual([call for call in self.calls() if call.startswith("gh")], ["gh auth status"] * 2)
+
+
+class LostStateTest(unittest.TestCase):
+    """The state directory can go away during a run. The handoff must still happen."""
+
+    def setUp(self):
+        self.writes = []
+        self.fail = False
+        names = ("add_label", "remove_label", "add_comment", "RETRY_WAIT_S", "STATE", "POLL_S", "gh_pages")
+        names += ("preconditions", "read_issue", "ensure_labels")
+        for name in names:
+            self.addCleanup(setattr, runner, name, getattr(runner, name))
+        self.addCleanup(setattr, runner.Run, "work", runner.Run.work)
+        self.state = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state.cleanup)
+        runner.STATE = os.path.join(self.state.name, "state")
+        runner.RETRY_WAIT_S = runner.POLL_S = 0
+        runner.add_label = lambda number, label: self.write("add", number, label)
+        runner.remove_label = lambda number, label: self.write("remove", number, label)
+        runner.add_comment = lambda number, text: self.write("comment", number, text)
+        runner.preconditions = lambda: []
+        runner.read_issue = lambda number: issue()
+        runner.ensure_labels = lambda: None
+
+    def write(self, action, number, text):
+        self.writes.append((action, number, text))
+        return (1, "", "HTTP 502") if self.fail else (0, "", "")
+
+    def lose_state(self, for_ever=False):
+        shutil.rmtree(runner.STATE)
+        if for_ever:  # a file is in the way, so the directory cannot come back
+            with open(runner.STATE, "w", encoding="utf-8") as f:
+                f.write("x")
+
+    def quiet(self, call, *args):
+        self.printed = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(self.printed):
+            return call(*args)
+
+    def test_log_makes_a_lost_directory_again(self):
+        run = runner.Run(issue())
+        run.log("first")
+        self.lose_state()
+        run.log("second")
+        with open(run.logpath, encoding="utf-8") as f:
+            self.assertTrue(f.read().endswith(" second\n"))
+
+    def test_log_never_raises(self):
+        run = runner.Run(issue())
+        self.lose_state(for_ever=True)
+        self.quiet(run.log, "to stderr")
+        self.assertIn("run.log is not writable", self.printed.getvalue())
+        self.assertTrue(self.printed.getvalue().endswith(" to stderr\n"))
+        with contextlib.redirect_stderr(None):  # no stderr at all
+            run.log("nowhere")
+
+    def test_the_lock_can_be_released_without_a_state_directory(self):
+        self.assertTrue(runner.take_lock())
+        self.lose_state()
+        runner.drop_lock()
+        self.assertTrue(runner.take_lock())  # and a later run makes the directory again
+        runner.drop_lock()
+
+    def crash_in_work(self, for_ever):
+        def work(run):
+            self.lose_state(for_ever)
+            raise FileNotFoundError(2, "No such file or directory", run.logpath)
+
+        runner.Run.work = work
+        return self.quiet(runner.run_ticket, 13)
+
+    def test_an_error_after_the_directory_is_lost_still_hands_off(self):
+        for for_ever in (False, True):
+            self.writes = []
+            if os.path.isfile(runner.STATE):
+                os.remove(runner.STATE)
+            self.assertEqual(self.crash_in_work(for_ever), 1)
+            actions = [write[:2] + (write[2] if write[0] != "comment" else "",) for write in self.writes]
+            self.assertEqual(
+                actions,
+                [
+                    ("add", 13, "agent-working"),  # the start
+                    ("comment", 13, ""),
+                    ("add", 13, "needs-human"),
+                    ("remove", 13, "agent-go"),
+                    ("remove", 13, "agent-working"),
+                ],
+            )
+            comment = self.writes[1][2]
+            for part in ("`needs-human`", "FileNotFoundError", "run.log", "The run directory may be incomplete."):
+                self.assertIn(part, comment)
+            self.assertIn("(it is gone or not complete)", comment)
+            self.assertIn("Traceback", self.printed.getvalue())
+
+    def test_a_failed_handoff_without_a_directory_goes_to_stderr(self):
+        def add_label(number, label):  # the start works, and then GitHub is away
+            return (0, "", "") if label == "agent-working" else self.write("add", number, label)
+
+        runner.add_label = add_label
+        self.fail = True
+        self.assertEqual(self.crash_in_work(for_ever=True), 3)
+        printed = self.printed.getvalue()
+        for part in ("writes to GitHub failed", "HANDOFF_FAILED is not writable", "Do them by hand", "FileNotFoundError"):
+            self.assertIn(part, printed)
+
+    def test_an_error_in_the_handoff_is_exit_code_3(self):
+        def broken(number, text):
+            raise ValueError("broken")
+
+        runner.add_comment = broken
+        runner.Run.work = lambda run: "all good"
+        self.assertEqual(self.quiet(runner.run_ticket, 13), 3)
+        self.assertIn("the handoff failed", self.printed.getvalue())
+        self.assertIn("ValueError: broken", self.printed.getvalue())
+
+    def test_the_wait_for_the_review_does_not_need_the_run_directory(self):
+        sha = "a1a1e7caa2f5080e4211538b953a375bae1ce9c7"
+        review = {"id": 1, "updated_at": "t", "user": {"login": runner.REVIEW_AUTHOR}, "body": fixture("review-clean.md")}
+        done = [{"check_runs": [{"status": "completed", "conclusion": "success"}]}]
+        answers = [[[]], [{"check_runs": []}], [[review]], done]  # poll 1: nothing yet. poll 2: all there.
+        polls = []
+
+        def gh_pages(endpoint):
+            polls.append(endpoint)
+            if len(polls) == 1:
+                self.lose_state(for_ever=True)  # the cleanup comes during the wait
+            return answers[len(polls) - 1]
+
+        runner.gh_pages = gh_pages
+        run = runner.Run(issue())
+        run.pr = 19
+        kind, count, body, key, ci = self.quiet(run.wait_for_review, sha, set())
+        self.assertEqual((kind, ci, len(polls)), ("clean", "success", 4))
+        # and the normal end still works: the comment and the label go to GitHub
+        self.assertEqual(self.quiet(run.finish, True, "CI is green."), 0)
+        self.assertEqual([write[:2] for write in self.writes][:2], [("comment", 13), ("add", 19)])
+        self.assertIn("(it is gone or not complete)", self.writes[0][2])
 
 
 class FlowTest(unittest.TestCase):

@@ -45,8 +45,9 @@ It changes nothing.
 
 `python3 yantra/runner.py run <N>` does these steps for issue `<N>`.
 
-1. It checks that `gh` is logged in, that Docker runs and that `claude` is on the PATH.
+1. It checks that `gh` is logged in, that Docker runs, that the two Docker images of the checks are on the machine, and that `claude` is on the PATH.
    If not, it exits with code 2 and writes nothing to GitHub.
+   For a tick, the issue keeps `agent-go`.
 2. It reads the issue.
    It puts the label `agent-working` on the issue, and then takes `agent-go` off.
    Then it validates the ticket.
@@ -131,6 +132,12 @@ At the end, the runner tries each write to GitHub 3 times.
 It removes `agent-go` in each case.
 It removes `agent-working` last, and only when the comment and the end label are there.
 If a write still fails, the run directory gets the file `HANDOFF_FAILED` with the writes that a person must do, and the exit code is 3.
+If that file cannot be written, its text goes to stderr, which is `tick.log` for a tick.
+
+The handoff does not need the run directory.
+The log never stops a run: when `run.log` cannot be written, the line goes to stderr.
+When the run directory is gone during the wait for the review, the wait goes on, because it needs only GitHub.
+An error in the runner after the label change ends as `needs-human`, with the error in the comment.
 
 Exit codes of `run` and `tick`:
 
@@ -182,8 +189,12 @@ The agent gets `yantra/brief.md` from the new clone, which is `origin/main`.
 
 ## Logs
 
-The state directory is `~/Library/Caches/yantra`.
+The state directory is `~/.local/state/yantra`.
+It is not in a cache folder, because a cleanup tool can empty those at any time.
 The variable `YANTRA_STATE` changes it.
+The macOS path has a space, so put it in quotes in a shell.
+Do not put the state in a cache folder.
+A cleanup tool can empty a cache folder while a run waits for the review.
 
 - `tick.log`: the output of each tick from launchd.
 - `runs/ticket-<N>-<UTC time>/run.log`: each command of one run, with its exit code and output, and UTC times.
@@ -204,6 +215,8 @@ The agent can:
 - run one command, `yt`, with the tool Bash.
 
 `yt` is a script that the runner writes to `bin/yt` in the run directory, outside the clone.
+The agent calls it as `../bin/yt` from the root of the clone, or with the full path in quotes.
+A Bash rule compares the text of the command, and the first form has no space for each state directory.
 It builds each Docker command itself: only the clone is mounted, read-only, with `--network none --pull never`.
 
 | Command | What it does |

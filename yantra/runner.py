@@ -25,8 +25,12 @@ from datetime import datetime, timezone
 
 # Config.
 REPO = "bettersandeep/lekha"
+# The state is not in a cache folder: a cleanup tool can empty a cache folder during a run.
+# The macOS path has a space, so each shell use of it needs quotes.
+# No space in the path: the agent's one Bash rule compares the text of the command.
+STATE_DEFAULT = "~/.local/state/yantra"
 # realpath: the permission rules of the agent compare real paths.
-STATE = os.path.realpath(os.path.expanduser(os.environ.get("YANTRA_STATE", "~/Library/Caches/yantra")))
+STATE = os.path.realpath(os.path.expanduser(os.environ.get("YANTRA_STATE") or STATE_DEFAULT))
 AGENT_LIMIT_S = 45 * 60
 REVIEW_WAIT_S = 20 * 60
 FIX_ATTEMPTS = 2  # one budget for failed checks and for review findings
@@ -297,6 +301,15 @@ def join_pages(pages, key=None):
     return items
 
 
+def yt_calls(run_dir):
+    """The two texts that start a `yt` call. A Bash rule compares the text of the command.
+
+    The first one has no space for each run directory: the agent works in <run dir>/repo.
+    The second one is the full path, in quotes when it has a space.
+    """
+    return ["../bin/yt", shlex.quote(os.path.join(run_dir, "bin", "yt"))]
+
+
 def agent_command(prompt, clone, run_dir):
     """The command line of one headless agent. The flag names are from `claude --help`.
 
@@ -308,8 +321,7 @@ def agent_command(prompt, clone, run_dir):
         "Read(/%s/**)" % clone,
         "Read(/%s/input/**)" % run_dir,
         "Edit(/%s/**)" % clone,
-        "Bash(%s/bin/yt *)" % run_dir,
-    ]
+    ] + ["Bash(%s *)" % call for call in yt_calls(run_dir)]
     deny = ["Edit(/%s/.git/**)" % clone]
     return (
         ["claude", "-p", prompt, "--tools", AGENT_TOOLS, "--allowedTools"]
@@ -339,11 +351,14 @@ def yt_script(clone):
 
 
 def run_text(run_dir):
+    short, full = yt_calls(run_dir)
     return (
         "# This run\n\n"
-        "The command `yt` of this run is `%s/bin/yt`.\n"
-        "Call it with this full path, and with one `yt` command in each call.\n"
-        "The runner puts files for you in `%s/input/`. You can read them." % (run_dir, run_dir)
+        "Your working directory is the root of the clone. Do not change it.\n"
+        "Call `yt` from there, exactly in this form: `%s check`.\n"
+        "If that call is denied, use the full path, exactly in this form: `%s check`.\n"
+        "Use one `yt` command in each call.\n"
+        "The runner puts files for you in `%s/input/`. You can read them." % (short, full, run_dir)
     )
 
 
@@ -481,6 +496,11 @@ def preconditions():
             problems.append("`%s` is not on PATH" % name)
         elif cmd and sh(cmd)[0] != 0:  # the output is not kept: `gh auth status` prints a part of the token
             problems.append("`%s` failed" % " ".join(cmd))
+    if not problems:
+        # The checks use --pull never. A missing image must stop the run before a write to GitHub.
+        for image in (RUST_IMAGE, GUARD_IMAGE):
+            if sh(["docker", "image", "inspect", image])[0] != 0:
+                problems.append("the Docker image `%s` is not on this machine" % image)
     return problems
 
 
@@ -553,9 +573,22 @@ class Run:
         self.old = self.new = self.applicable = None
 
     def log(self, text):
+        """Write one entry to run.log. It never raises: the log must not stop the handoff."""
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with open(self.logpath, "a", encoding="utf-8") as f:
-            f.write("%s %s\n" % (stamp, TOKEN.sub("<token>", text.rstrip())))
+        line = "%s %s\n" % (stamp, TOKEN.sub("<token>", str(text).rstrip()))
+        try:
+            try:
+                with open(self.logpath, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except OSError:
+                os.makedirs(self.dir, exist_ok=True)  # the run directory is gone: make it one time
+                with open(self.logpath, "a", encoding="utf-8") as f:
+                    f.write(line)
+        except Exception:
+            try:
+                sys.stderr.write("yantra: run.log is not writable: " + line)
+            except Exception:
+                pass
 
     def sh(self, cmd, cwd=None, timeout=300, env=None):
         code, out, err = sh(cmd, cwd=cwd, timeout=timeout, env=env)
@@ -747,9 +780,11 @@ class Run:
         # The guard of origin/main lies over the guard of the candidate, at its normal path.
         trusted = ["-v", self.guard + ":/src/ci/guard.sh:ro"]
         code, out, err = self.sh(mount + trusted + [GUARD_IMAGE, "sh", "-c", GUARD_SCRIPT], timeout=CHECK_LIMIT_S)
+        self.docker_ran("guard", code, err)
         if code != 0:
             return "guard", out + err
         code, out, err = self.sh(mount + [RUST_IMAGE, "sh", "-c", BUILD_SCRIPT], timeout=CHECK_LIMIT_S)
+        self.docker_ran("build", code, err)
         if code != 0:
             return "build", out + err
         try:
@@ -765,6 +800,11 @@ class Run:
         self.new, self.applicable = new, applicable
         self.log("checks passed, score %d -> %d of %d" % (self.old, new, applicable))
         return None
+
+    def docker_ran(self, name, code, err):
+        """Exit code 125 is from Docker itself: a missing image or mount. The agent cannot fix that."""
+        if code == 125:
+            raise NeedsHuman("Docker could not start the %s check: %s" % (name, err.strip()[-300:]))
 
     def push(self, criteria):
         """Push the branch, then open the pull request or set its new body. Return the head sha."""
@@ -829,7 +869,8 @@ class Run:
             score = "%d -> %d of %d" % (self.old, self.new, self.applicable)
         lines = ["The yantra runner stopped: `%s`." % label, "", note, ""]
         lines += ["- Pull request: %s" % (self.pr_url or "none"), "- Score: %s" % score]
-        lines += ["- Agent starts: %d" % self.starts, "- Run directory: `%s`" % self.dir]
+        gone = "" if os.path.isdir(self.input) else " (it is gone or not complete)"
+        lines += ["- Agent starts: %d" % self.starts, "- Run directory: `%s`%s" % (self.dir, gone)]
         text = TOKEN.sub("<token>", "\n".join(lines))
         self.log("end state: %s. %s" % (label, note))
         number = self.number
@@ -852,13 +893,17 @@ class Run:
         print("yantra: ticket %d: %s. %s Log: %s" % (number, label, note, self.logpath))
         if failed:
             handoff = os.path.join(self.dir, "HANDOFF_FAILED")
-            with open(handoff, "w", encoding="utf-8") as f:
-                f.write("The run ended as `%s`, and these writes to GitHub did not work:\n" % label)
-                f.write("".join("- %s\n" % item for item in failed))
-                f.write("\nDo them by hand. The text of the comment:\n\n%s\n" % text)
+            todo = "The run ended as `%s`, and these writes to GitHub did not work:\n" % label
+            todo += "".join("- %s\n" % item for item in failed)
+            todo += "\nDo them by hand. The text of the comment:\n\n%s\n" % text
             self.log("the handoff failed: %s" % "; ".join(failed))
             print("yantra: ticket %d: writes to GitHub failed: %s" % (number, "; ".join(failed)), file=sys.stderr)
-            print("yantra: do them by hand. See %s" % handoff, file=sys.stderr)
+            try:
+                with open(handoff, "w", encoding="utf-8") as f:
+                    f.write(todo)
+                print("yantra: do them by hand. See %s" % handoff, file=sys.stderr)
+            except OSError as error:
+                print("yantra: %s is not writable (%s). Its text:\n%s" % (handoff, error, todo), file=sys.stderr)
             return 3
         return 0 if ready else 1
 
@@ -882,13 +927,24 @@ def run_ticket(number):
         run.log("the run did not start: %s" % error)
         print("yantra: the run cannot start: %s" % error, file=sys.stderr)
         return 2
+    # From here the issue has agent-working. Each way out ends in the handoff of finish.
     try:
-        return run.finish(True, run.work())
+        ready, note = True, run.work()
     except NeedsHuman as stop:
-        return run.finish(False, str(stop))
+        ready, note = False, str(stop)
     except Exception as error:  # fail closed: an error in the runner is a stop for a human, with the label
-        run.log(traceback.format_exc())
-        return run.finish(False, "error in the runner: %s: %s" % (type(error).__name__, error))
+        trace = traceback.format_exc()
+        print("yantra: ticket %d: error in the runner:\n%s" % (number, trace), file=sys.stderr)
+        run.log(trace)
+        note = "Error in the runner: %s: %s. The run directory may be incomplete." % (type(error).__name__, error)
+        ready = False
+    try:
+        return run.finish(ready, note)
+    except Exception:  # the handoff itself broke. Nothing more can be written, so stderr gets it.
+        outcome = "ready" if ready else "needs a human"
+        print("yantra: ticket %d: the handoff failed. The issue can still have `agent-working`." % number, file=sys.stderr)
+        print("yantra: the outcome was: %s. %s\n%s" % (outcome, note, traceback.format_exc()), file=sys.stderr)
+        return 3
 
 
 def cmd_run(number):

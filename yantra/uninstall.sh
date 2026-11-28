@@ -16,4 +16,4 @@ if [ -f "$target" ]; then
 else
 	echo "there is no $target"
 fi
-echo "kept the state directory: ${YANTRA_STATE:-$HOME/Library/Caches/yantra}"
+echo "kept the state directory: \"${YANTRA_STATE:-$HOME/.local/state/yantra}\""
