@@ -523,7 +523,7 @@ def preconditions():
         # The checks use --pull never. A missing image must stop the run before a write to GitHub.
         for image in (RUST_IMAGE, GUARD_IMAGE):
             if sh(["docker", "image", "inspect", image])[0] != 0:
-                problems.append("the Docker image `%s` is not on this machine" % image)
+                problems.append("the Docker image `%s` is not on this machine. See \"Images\" in yantra/README.md" % image)
     return problems
 
 
@@ -1043,19 +1043,35 @@ def cmd_run(number):
         drop_lock()
 
 
+def pick_ticket(listed):
+    """The ticket for this tick, and the tickets that a tick must not start.
+
+    A ticket that has `agent-go` and also `agent-working` is the mark of a run
+    whose last writes to GitHub failed. A new run of it would be a second run.
+    """
+    free, stuck = [], []
+    for issue in listed:
+        names = [label["name"] for label in issue["labels"]]
+        (stuck if "agent-working" in names else free).append(issue["number"])
+    return (min(free) if free else None), sorted(stuck)
+
+
 def cmd_tick():
     if not take_lock():
         return 0  # a run is in progress
     try:
         try:
-            query = ["--label", "agent-go", "--state", "open", "--limit", "200", "--json", "number"]
+            query = ["--label", "agent-go", "--state", "open", "--limit", "200", "--json", "number,labels"]
             listed = gh_json(["issue", "list", "-R", REPO] + query)
-        except (RuntimeError, ValueError) as error:
+            number, stuck = pick_ticket(listed)
+        except (RuntimeError, ValueError, KeyError, TypeError) as error:
             warn("yantra: tick cannot read the issues: %s" % error)
             return 2
-        if not listed:
+        for n in stuck:
+            warn("yantra: ticket %d has `agent-go` and `agent-working`. An earlier handoff failed. A person must look." % n)
+        if number is None:
             return 0
-        return run_ticket(min(issue["number"] for issue in listed))
+        return run_ticket(number)
     finally:
         drop_lock()
 

@@ -16,6 +16,8 @@ jobs:
       # A fast signal only. This file and this guard come from the pull request.
       # The guard that counts is in guard.yml, which GitHub takes from the base branch.
       - run: sh ci/guard.sh
+      # The tests of the runner. A change to yantra/ has no other check in CI.
+      - run: python3 -m unittest discover -s yantra -p 'test_*.py'
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked -- --nocapture
