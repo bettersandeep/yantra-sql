@@ -545,7 +545,10 @@ class StartTest(unittest.TestCase):
             os.environ["YT_TEST_MISSING"] = image
             if os.path.exists(self.log):
                 os.remove(self.log)
-            self.assertEqual(runner.preconditions(), ["the Docker image `%s` is not on this machine" % image])
+            self.assertEqual(
+                runner.preconditions(),
+                ["the Docker image `%s` is not on this machine. See \"Images\" in yantra/README.md" % image],
+            )
             printed = io.StringIO()
             with contextlib.redirect_stderr(printed):
                 self.assertEqual(runner.run_ticket(18), 2)
@@ -890,3 +893,24 @@ class BranchNameTest(unittest.TestCase):
         self.assertEqual(runner.ticket_branches(refs, 18), ["cast-to-integer-in-18"])
         self.assertEqual(runner.ticket_branches(refs, 4), [])
         self.assertEqual(runner.ticket_branches(refs, 7), [])
+
+
+class PickTicketTest(unittest.TestCase):
+    def issue(self, number, *labels):
+        return {"number": number, "labels": [{"name": name} for name in labels]}
+
+    def test_lowest_free_ticket(self):
+        listed = [self.issue(9, "ticket", "agent-go"), self.issue(4, "agent-go", "ticket")]
+        self.assertEqual(runner.pick_ticket(listed), (4, []))
+
+    def test_a_ticket_with_a_failed_handoff_is_not_started_again(self):
+        listed = [self.issue(4, "agent-go", "agent-working"), self.issue(9, "agent-go")]
+        self.assertEqual(runner.pick_ticket(listed), (9, [4]))
+        self.assertEqual(runner.pick_ticket([self.issue(4, "agent-go", "agent-working")]), (None, [4]))
+
+    def test_no_ticket(self):
+        self.assertEqual(runner.pick_ticket([]), (None, []))
+
+    def test_an_issue_without_labels_is_an_error(self):
+        with self.assertRaises(KeyError):
+            runner.pick_ticket([{"number": 4}])

@@ -149,6 +149,22 @@ Exit codes of `run` and `tick`:
 | 2 | The run could not start. |
 | 3 | The run ended, and a last write to GitHub failed. |
 
+## Images
+
+The runner needs three Docker images. It never pulls an image itself, so make them one time, with a network:
+
+```
+docker build -t yantra-rust:1.96.1 -f yantra/rust.Dockerfile yantra
+docker pull golang:1.23
+docker pull python:3.13-slim
+```
+
+`yantra-rust:1.96.1` runs the build checks.
+`golang:1.23` runs the guard, because it has git and sha256sum.
+`python:3.13-slim` is for `yt sqlite`.
+A run does not start when the first or the second image is missing.
+A cleanup of unused Docker images removes them, and then they must be made again.
+
 ## Start and stop
 
 Work one ticket by hand:
