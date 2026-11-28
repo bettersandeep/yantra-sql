@@ -1,11 +1,6 @@
 # Qodo review setup for this repo. Key names: https://docs.qodo.ai/configuration/configuration-and-command-reference
 # Qodo takes this file from the default branch, so a pull request cannot change the setup of its own review.
 
-[review_agent]
-# The same text goes to the agent that looks for bugs and to the agent that checks the rules.
-issues_user_guidelines = "In this project a ticket is a contract. Compare the change with the acceptance criteria of the linked ticket in both directions. Report as a finding each behaviour that the change adds and that no criterion of the ticket asks for, for example a new limit, a new error case or a new function. Name what was added and say that the ticket does not ask for it. When a pull request has no linked ticket, report that as a finding. Respect this product decision: for an input that the engine does not support, it returns an error and never a guessed value, so such an error is allowed where SQLite gives a value. For an input that the README lists as supported, an error is a bug. A value that differs from the value of SQLite is always a bug."
-compliance_user_guidelines = "In this project a ticket is a contract. Compare the change with the acceptance criteria of the linked ticket in both directions. Report as a finding each behaviour that the change adds and that no criterion of the ticket asks for, for example a new limit, a new error case or a new function. Name what was added and say that the ticket does not ask for it. When a pull request has no linked ticket, report that as a finding. Respect this product decision: for an input that the engine does not support, it returns an error and never a guessed value, so such an error is allowed where SQLite gives a value. For an input that the README lists as supported, an error is a bug. A value that differs from the value of SQLite is always a bug."
-
 [review_agent_ux]
 # Show which sources the review used (ticket, rules, files).
 show_context_used = true
