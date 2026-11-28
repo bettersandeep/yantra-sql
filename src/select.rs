@@ -68,6 +68,8 @@ struct Parser<'a> {
     pos: usize,
     /// The number of `unary` calls that are in progress.
     depth: usize,
+    /// True while the parser reads the argument of an aggregate function.
+    in_aggregate: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -112,9 +114,74 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// `+ unary`, `- unary`, an integer literal, `NULL`, `( expr )`,
-    /// `COALESCE ( expr , expr {, expr} )` or `NULLIF ( expr , expr )`.
-    /// The two functions are from https://www.sqlite.org/lang_corefunc.html.
+    /// A function call. The parser is at the name, and the next token is `(`.
+    /// `COALESCE ( expr , expr {, expr} )` and `NULLIF ( expr , expr )` are from
+    /// https://www.sqlite.org/lang_corefunc.html.
+    /// `COUNT ( * )` and `(COUNT | MIN | MAX | SUM) ( [ALL | DISTINCT] expr )` are from
+    /// https://www.sqlite.org/lang_aggfunc.html.
+    /// A SELECT without FROM has one row, so each aggregate sees one value.
+    fn call(&mut self, name: &str) -> Result<Option<i64>, Error> {
+        let function = name.to_ascii_uppercase();
+        let aggregate = matches!(function.as_str(), "COUNT" | "MIN" | "MAX" | "SUM");
+        if !aggregate && function != "COALESCE" && function != "NULLIF" {
+            return Err(self.unexpected());
+        }
+        self.pos += 2;
+        if aggregate {
+            // SQLite 3.49.1 gives "misuse of aggregate function COUNT()" for `SELECT MAX(COUNT(*))`.
+            if self.in_aggregate {
+                return Err(Error(format!("misuse of aggregate function {name}")));
+            }
+            // The number of rows.
+            if function == "COUNT"
+                && self.tokens[self.pos..].starts_with(&[Token::Star, Token::RightParen])
+            {
+                self.pos += 2;
+                return Ok(Some(1));
+            }
+            // One value has no duplicates, so DISTINCT changes nothing.
+            if !self.keyword("ALL") {
+                self.keyword("DISTINCT");
+            }
+            self.in_aggregate = true;
+        }
+        let mut args = Vec::new();
+        loop {
+            args.push(self.expr()?);
+            match self.peek() {
+                Some(Token::Comma) => self.pos += 1,
+                Some(Token::RightParen) => break,
+                _ => return Err(self.unexpected()),
+            }
+        }
+        self.pos += 1;
+        if aggregate {
+            self.in_aggregate = false;
+        }
+        match (function.as_str(), &args[..]) {
+            // The first argument that is not NULL, or NULL.
+            ("COALESCE", [_, _, ..]) => Ok(args.iter().find_map(|arg| *arg)),
+            // NULL if the arguments are the same, else the first argument.
+            // If `a` is NULL, the two branches give the same result.
+            // If only `b` is NULL, the arguments are different.
+            ("NULLIF", [a, b]) => Ok(if a == b { None } else { *a }),
+            // The number of values that are not NULL.
+            ("COUNT", [arg]) => Ok(Some(i64::from(arg.is_some()))),
+            // The minimum, the maximum and the sum of one value are that value.
+            // Each one is NULL when there is no value that is not NULL.
+            ("MIN" | "MAX" | "SUM", [arg]) => Ok(*arg),
+            // With two or more arguments, these are scalar functions in SQLite.
+            // See `max(X,Y,...)` in https://www.sqlite.org/lang_corefunc.html.
+            ("MIN" | "MAX", [_, _, ..]) => Err(Error(format!(
+                "the function {name} with more than one argument is not supported"
+            ))),
+            _ => Err(Error(format!(
+                "wrong number of arguments to function {name}"
+            ))),
+        }
+    }
+
+    /// `+ unary`, `- unary`, an integer literal, `NULL`, `( expr )` or a function call.
     /// Each recursion of the parser goes through this function.
     fn unary(&mut self) -> Result<Option<i64>, Error> {
         if self.depth == MAX_DEPTH {
@@ -142,40 +209,7 @@ impl<'a> Parser<'a> {
                 None
             }
             Some(Token::Word(name)) if self.tokens.get(self.pos + 1) == Some(&Token::LeftParen) => {
-                let coalesce = name.eq_ignore_ascii_case("COALESCE");
-                if !coalesce && !name.eq_ignore_ascii_case("NULLIF") {
-                    return Err(self.unexpected());
-                }
-                self.pos += 2;
-                let mut args = Vec::new();
-                loop {
-                    args.push(self.expr()?);
-                    match self.peek() {
-                        Some(Token::Comma) => self.pos += 1,
-                        Some(Token::RightParen) => break,
-                        _ => return Err(self.unexpected()),
-                    }
-                }
-                self.pos += 1;
-                match args[..] {
-                    // The first argument that is not NULL, or NULL.
-                    [_, _, ..] if coalesce => args.iter().find_map(|arg| *arg),
-                    // NULL if the arguments are the same, else the first argument.
-                    // If `a` is NULL, the two branches give the same result.
-                    // If only `b` is NULL, the arguments are different.
-                    [a, b] if !coalesce => {
-                        if a == b {
-                            None
-                        } else {
-                            a
-                        }
-                    }
-                    _ => {
-                        return Err(Error(format!(
-                            "wrong number of arguments to function {name}"
-                        )));
-                    }
-                }
+                self.call(name)?
             }
             Some(Token::LeftParen) => {
                 self.pos += 1;
@@ -201,6 +235,7 @@ pub fn select(sql: &str) -> Result<Vec<Value>, Error> {
         tokens: lex(sql)?,
         pos: 0,
         depth: 0,
+        in_aggregate: false,
     };
     if !parser.keyword("SELECT") {
         return Err(parser.unexpected());
@@ -437,7 +472,6 @@ mod tests {
             "SELECT coalesce2(1, 2)",
             "SELECT nullifx(1, 2)",
             "SELECT null_if(1, 2)",
-            "SELECT COUNT(*)",
             "SELECT CAST(NULL AS INTEGER)",
             "SELECT COALESCE(NULL, ifnull(NULL, 2))",
             "SELECT main.coalesce(1, 2)",
@@ -447,6 +481,196 @@ mod tests {
         assert_eq!(
             select("SELECT abs (1)").unwrap_err().to_string(),
             "unsupported syntax at Word(\"abs\")"
+        );
+    }
+
+    #[test]
+    fn count_of_the_one_row() {
+        assert_eq!(
+            run(
+                "SELECT COUNT(*), count ( * ), COUNT(1), COUNT(0), COUNT(ALL 5), COUNT(DISTINCT 5), \
+                 COUNT(- 1), COUNT(ALL(2)), COUNT(DISTINCT(3))"
+            ),
+            ints(&[1; 9])
+        );
+        assert_eq!(
+            run(
+                "SELECT COUNT(NULL), COUNT(ALL NULL), COUNT(DISTINCT NULL), COUNT(1 / 0), \
+                 COUNT(NULLIF(2, 2)), COUNT(1 + NULL)"
+            ),
+            ints(&[0; 6])
+        );
+        for sql in [
+            // SQLite gives 1 for the next two.
+            "SELECT COUNT()",
+            "SELECT COUNT(ALL)",
+            "SELECT COUNT(DISTINCT)",
+            "SELECT COUNT(DISTINCT *)",
+            "SELECT COUNT(ALL *)",
+            "SELECT COUNT(1, 2)",
+            "SELECT COUNT(DISTINCT 1, 2)",
+            "SELECT COUNT(*, 1)",
+            "SELECT COUNT(1, *)",
+            "SELECT COUNT(**)",
+            "SELECT COUNT((*))",
+            "SELECT COUNT(DISTINCT ALL 1)",
+            "SELECT COUNT(ALL DISTINCT 1)",
+            "SELECT COUNT(*",
+            "SELECT COUNT(1 AS a)",
+            // SQLite gives 1. The overflow is a real number there.
+            "SELECT COUNT(9223372036854775807 + 1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
+    #[test]
+    fn min_max_and_sum_of_one_value() {
+        assert_eq!(
+            run(
+                "SELECT MIN(3), MAX(4), SUM(5), min(ALL 6), Max ( DISTINCT 7 ), sUm(DISTINCT - 8), \
+                 SUM(ALL(0)), MIN(2 * 3), MAX(-9223372036854775807 - 1), SUM(9223372036854775807)"
+            ),
+            ints(&[3, 4, 5, 6, 7, -8, 0, 6, i64::MIN, i64::MAX])
+        );
+        assert_eq!(
+            run(
+                "SELECT MIN(NULL), MAX(NULL), SUM(NULL), SUM(ALL NULL), MIN(DISTINCT NULL), \
+                 MAX(1 / 0), SUM(NULLIF(3, 3))"
+            ),
+            [const { Value::Null }; 7]
+        );
+        for sql in [
+            "SELECT SUM()",
+            "SELECT MIN()",
+            "SELECT MAX()",
+            "SELECT SUM(*)",
+            "SELECT MIN(*)",
+            "SELECT MAX(*)",
+            "SELECT SUM(1, 2)",
+            "SELECT SUM(DISTINCT)",
+            "SELECT SUM(DISTINCT DISTINCT 1)",
+            "SELECT MAX(1",
+            "SELECT SUM(9223372036854775807 + 1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT Sum()").unwrap_err().to_string(),
+            "unsupported syntax at RightParen"
+        );
+        assert_eq!(
+            select("SELECT Sum(1, 2)").unwrap_err().to_string(),
+            "wrong number of arguments to function Sum"
+        );
+    }
+
+    #[test]
+    fn aggregate_in_a_larger_expression() {
+        assert_eq!(
+            run(
+                "SELECT - COUNT(*) * 2 + MAX(3), - MIN(- 3), (COUNT(*)), COUNT(*) * COUNT(*), \
+                 COALESCE(COUNT(NULL), 5), COALESCE(SUM(NULL), 5), COALESCE(NULL, MAX(4)), \
+                 NULLIF(MAX(3), 4), SUM(COALESCE(NULL, 6)), MIN(COALESCE(NULL, - 7))"
+            ),
+            ints(&[1, 3, 1, 1, 0, 5, 4, 3, 6, -7])
+        );
+        assert_eq!(
+            run(
+                "SELECT 1 + SUM(NULL), MIN(4) / COUNT(NULL), MAX(7) % COUNT(NULL), \
+                 NULLIF(COUNT(*), 1), NULLIF(SUM(1), SUM(1)), MAX(NULLIF(3, 3))"
+            ),
+            [const { Value::Null }; 6]
+        );
+        // Aggregates and plain expressions in one list, with ALL, DISTINCT and aliases.
+        assert_eq!(
+            run("SELECT COUNT(*), 5, MAX(2) + 1, NULL, COALESCE(NULL, 3)"),
+            [
+                Value::Integer(1),
+                Value::Integer(5),
+                Value::Integer(3),
+                Value::Null,
+                Value::Integer(3),
+            ]
+        );
+        assert_eq!(
+            run("SELECT DISTINCT COUNT(*) AS c, MAX(1) m, 2 count, 3 AS max"),
+            ints(&[1, 1, 2, 3])
+        );
+        assert_eq!(run("SELECT ALL MAX(1), 4 min, 5 AS sum"), ints(&[1, 4, 5]));
+        for sql in [
+            // SQLite gives a real number.
+            "SELECT SUM(9223372036854775807) + 1",
+            "SELECT COUNT(*) COUNT(*)",
+            "SELECT 1 count(*)",
+            "SELECT count",
+            "SELECT COUNT *",
+            // SQLite gives 1 for the next three.
+            "SELECT COUNT(*) OVER ()",
+            "SELECT COUNT(*) FILTER (WHERE 1)",
+            "SELECT SUM(1 ORDER BY 1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
+    #[test]
+    fn aggregate_inside_an_aggregate_is_an_error() {
+        for sql in [
+            "SELECT COUNT(COUNT(*))",
+            "SELECT MAX(MIN(1))",
+            "SELECT SUM(1 + COUNT(*))",
+            "SELECT MIN(- SUM(2))",
+            "SELECT SUM((COUNT(1)))",
+            "SELECT COUNT(DISTINCT COUNT(*))",
+            "SELECT COUNT(COALESCE(NULL, MAX(1)))",
+            "SELECT COUNT(NULLIF(COUNT(*), 1))",
+            "SELECT COALESCE(1, COUNT(COUNT(*)))",
+            "SELECT MIN(1) + MAX(SUM(2))",
+            "SELECT 1, MAX(MAX(1))",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT MAX(Count(*))").unwrap_err().to_string(),
+            "misuse of aggregate function Count"
+        );
+        // An aggregate after the end of an aggregate is not inside it.
+        assert_eq!(
+            run(
+                "SELECT MAX(1) + MAX(2), COALESCE(SUM(NULL), MIN(4)), COUNT(COALESCE(NULL, 2)) + COUNT(*)"
+            ),
+            ints(&[3, 4, 2])
+        );
+    }
+
+    #[test]
+    fn other_aggregates_and_scalar_min_max_are_errors() {
+        for sql in [
+            // SQLite gives a value for each of these.
+            "SELECT MIN(1, 2)",
+            "SELECT MAX(1, 2)",
+            "SELECT MAX(1, 2, 3)",
+            "SELECT MIN(1, NULL)",
+            "SELECT MIN(DISTINCT 1, 2)",
+            "SELECT MAX(COUNT(*), 0)",
+            "SELECT MAX(MAX(1), 2)",
+            "SELECT MAX(MAX(1, 2))",
+            "SELECT AVG(1)",
+            "SELECT avg(NULL)",
+            "SELECT TOTAL(1)",
+            "SELECT GROUP_CONCAT(1)",
+            "SELECT COUNT(*) + AVG(1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT max(1, 2)").unwrap_err().to_string(),
+            "the function max with more than one argument is not supported"
+        );
+        assert_eq!(
+            select("SELECT 1 + AVG (1)").unwrap_err().to_string(),
+            "unsupported syntax at Word(\"AVG\")"
         );
     }
 
@@ -519,7 +743,6 @@ mod tests {
             "SELECT 0x10",
             "SELECT a",
             "SELECT abs(1)",
-            "SELECT COUNT(*)",
             "SELECT CASE WHEN 1 THEN 2 END",
             "SELECT CAST(1 AS INTEGER)",
             "SELECT 1 = 1",
