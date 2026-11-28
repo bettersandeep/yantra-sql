@@ -96,7 +96,10 @@ When a step cannot read or understand its input, the run stops as "needs a human
 
 The pull request review comes late: by then the commit is public.
 So Qodo also reviews the work before the runner commits it.
-The runner runs `qodo review --json` in the clone, not the agent, and the tool limits of the agent do not change.
+The runner runs `qodo review --json`, not the agent, and the tool limits of the agent do not change.
+Qodo does not review the clone. The runner takes a snapshot of the work as a git tree, puts that tree in a copy that the agent cannot write to (`review/` in the run directory), and Qodo reviews the copy.
+The runner then makes the commit from the same tree, so the commit is what Qodo saw.
+After each agent start the runner kills each process that the agent left behind.
 
 - The review gets the ticket URL (`--ticket`) and a context file (`--context-file`).
   Its `notes` has the ticket title and the acceptance criteria.

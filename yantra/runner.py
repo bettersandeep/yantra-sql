@@ -984,7 +984,7 @@ class Run:
                 )
             recent = [why, "Changed in this round:\n" + self.changes(before, after)] if why else []
             # No commit without a local review. A review that cannot run stops the run before the commit.
-            blocking = self.local_review(criteria, recent)
+            blocking = self.local_review(criteria, recent, after)
             if blocking:
                 names = "; ".join(finding["title"] for finding in blocking)
                 if not attempts:
@@ -1106,6 +1106,10 @@ class Run:
                 if isinstance(stop, subprocess.TimeoutExpired):
                     raise NeedsHuman("the agent passed the time limit of %d minutes" % (AGENT_LIMIT_S // 60))
                 raise
+        try:  # a process that the agent left behind could change files during the review
+            os.killpg(agent.pid, signal.SIGKILL)
+        except OSError:
+            pass  # the usual case: the group is empty
         self.log("agent start %d: exit code %d" % (self.starts, code))
         with open(report, encoding="utf-8", errors="replace") as f:
             self.reports.append(f.read())
@@ -1132,12 +1136,36 @@ class Run:
         """The paths that differ between two snapshots, as `git diff --name-status` gives them."""
         return self.must_git("diff", "--name-status", "--no-renames", before, after).strip()
 
-    def local_review(self, criteria, recent_work=()):
-        """Qodo's review of the work that is not committed yet. Return the open findings at the threshold.
+    def review_copy(self, tree):
+        """Make the copy of the work that Qodo reviews, and return its path.
+
+        The copy is a git worktree in the run directory. It has the files of the snapshot
+        `tree` and no others, as changes that are not committed. The agent cannot write there.
+        Qodo reviews the copy and `commit` commits the same tree, so a file that changes in
+        the clone during or after the review cannot get into the commit.
+        The copy is on a branch with a name: with a detached HEAD, Qodo does not find its
+        earlier review of the run, and each review is a full one with new finding ids.
+        """
+        copy = os.path.join(self.dir, "review")
+        head = self.must_git("rev-parse", "HEAD").strip()
+        if not os.path.isdir(copy):
+            self.must_git("worktree", "add", "-q", "-b", "yantra-review", copy, head)
+        steps = (["reset", "-q", "--soft", head], ["read-tree", "-u", "--reset", tree], ["clean", "-ffdxq"])
+        for args in steps + (["diff", "--quiet"], ["write-tree"]):
+            code, out, err = self.sh(["git"] + GIT_SAFE + args, cwd=copy, env=GIT_ENV)
+            if code != 0:
+                raise NeedsHuman("git %s for the review copy failed: %s" % (args[0], (err or out).strip()[-300:]))
+        if out.strip() != tree:
+            raise NeedsHuman("the review copy is not the same as the snapshot of the work")
+        return copy
+
+    def local_review(self, criteria, recent_work, tree):
+        """Qodo's review of the snapshot `tree` of the work. Return the open findings at the threshold.
 
         The runner runs it, not the agent. NeedsHuman when it could not run or its output is not understood.
         """
-        if os.path.lexists(os.path.join(self.clone, ".qodo", "session-context.json")):
+        copy = self.review_copy(tree)
+        if os.path.lexists(os.path.join(copy, ".qodo", "session-context.json")):
             # Qodo attaches that file to the review. The agent could tell the reviewer what to think.
             raise NeedsHuman("the clone has the file `.qodo/session-context.json`, which Qodo reads as context of its review")
         number = self.local_reviews + 1
@@ -1149,7 +1177,7 @@ class Run:
         # Qodo gets the environment of the agent: no GitHub token. It finds its own login in the home directory.
         env = dict(GIT_ENV, **dict.fromkeys(TOKEN_NAMES))
         started = time.time()
-        code, out, err = self.sh(command, cwd=self.clone, timeout=LOCAL_REVIEW_LIMIT_S, env=env)
+        code, out, err = self.sh(command, cwd=copy, timeout=LOCAL_REVIEW_LIMIT_S, env=env)
         seconds = time.time() - started
         try:
             review = parse_local_review(out)
@@ -1178,31 +1206,21 @@ class Run:
         return blocking
 
     def commit(self, reviewed):
-        """Commit the changes of one agent round. Return False when there is no change.
+        """Commit the snapshot `reviewed` of one agent round. Return False when it has no change.
 
-        `reviewed` is the snapshot that the local review saw. The commit holds that
-        tree and no other: a process that the agent left behind can change a file
-        after the review, and such a change must not get into the commit.
-
-        `git add -A` takes each change. The scope check runs right after it and fails
-        the run for a path that is outside the Scope of the ticket. After the commit,
-        each file that git ignores goes away (.yt/, target/), so the checks see the
-        commit and nothing more.
+        `reviewed` is the tree that the local review saw. git makes the commit from that
+        tree and not from the files of the clone, so the commit is what Qodo saw. Then the
+        clone gets the files of the commit, and each other file goes away (.yt/, target/),
+        so the checks see the commit and nothing more.
         """
-        self.must_git("add", "-A")
-        if self.must_git("write-tree").strip() != reviewed:
-            raise NeedsHuman(
-                "the files of the clone changed after the Qodo local review of round %d. Nothing is committed." % self.starts
-            )
-        code, out, err = self.git("diff", "--cached", "--quiet")
-        if code == 0:
+        head = self.must_git("rev-parse", "HEAD").strip()
+        if self.must_git("rev-parse", "HEAD^{tree}").strip() == reviewed:
             return False
-        if code != 1:
-            raise NeedsHuman("git diff --cached failed: %s" % (err or out).strip()[-300:])
         message = "Ticket #%d: %s" % (self.number, self.issue["title"])
         if self.commits:
             message = "Ticket #%d: fixes after checks or review, round %d" % (self.number, self.commits + 1)
-        self.must_git("commit", "-q", "-m", message)
+        new = self.must_git("commit-tree", reviewed, "-p", head, "-m", message).strip()
+        self.must_git("reset", "-q", "--hard", new)
         self.commits += 1
         self.must_git("clean", "-ffdxq")
         if self.must_git("status", "--porcelain", "--ignored").strip():

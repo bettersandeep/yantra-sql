@@ -1276,6 +1276,7 @@ class LocalFlowTest(unittest.TestCase):
         run.make_clone = lambda: None
         run.base_tree = "base"
         run.snapshot = lambda: tree[0]
+        run.review_copy = lambda tree: run.clone
         run.changes = lambda before, after: "M\tsrc/select.rs"
         run.start_agent = start_agent
         run.sh = sh
@@ -1443,26 +1444,52 @@ class LocalFlowTest(unittest.TestCase):
         self.assertEqual((state, self.steps), ("needs", ["agent"]))
         self.assertIn("`.qodo/session-context.json`", note)
 
-    def test_the_commit_messages_count_commits_and_not_agent_starts(self):
+    def test_the_commit_is_the_tree_that_qodo_saw(self):
+        """Real git. A file changes after the snapshot: the review copy and the commit hold the snapshot."""
         state = tempfile.TemporaryDirectory()
         self.addCleanup(state.cleanup)
         self.addCleanup(setattr, runner, "STATE", runner.STATE)
         runner.STATE = state.name
         run = runner.Run(issue())
-        messages = []
-        run.git = lambda *args: (1, "", "")  # `git diff --cached --quiet`: there is a change
-        answers = {"commit": lambda args: messages.append(args[-1]), "write-tree": lambda args: "tree\n"}
-        run.must_git = lambda *args: answers.get(args[0], lambda args: "")(args)
-        run.starts = 2  # the first commit comes after the round for the local review
-        self.assertTrue(run.commit("tree"))
+        run.author = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+        os.makedirs(run.clone)
+        path = os.path.join(run.clone, "a.txt")
+
+        def write(text):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+        def read(where):
+            with open(where, encoding="utf-8") as f:
+                return f.read()
+
+        run.must_git("init", "-q", "-b", "main")
+        write("base\n")
+        run.must_git("add", "-A")
+        run.must_git("commit", "-q", "-m", "base")
+        base = run.snapshot()
+        self.assertFalse(run.commit(base))  # no change: no commit
+
+        write("reviewed\n")
+        reviewed = run.snapshot()
+        write("changed after the snapshot\n")
+        copy = run.review_copy(reviewed)
+        self.assertEqual(read(os.path.join(copy, "a.txt")), "reviewed\n")
+        self.assertEqual(run.sh(["git", "status", "--short"], cwd=copy)[1].strip(), "M  a.txt")
+        self.assertTrue(run.commit(reviewed))
+        self.assertEqual(run.must_git("rev-parse", "HEAD^{tree}").strip(), reviewed)
+        self.assertEqual(read(path), "reviewed\n")
+
+        # the next round: the copy follows the new commit, and the messages count commits
+        write("round 2\n")
+        second = run.snapshot()
+        copy = run.review_copy(second)
+        self.assertEqual(read(os.path.join(copy, "a.txt")), "round 2\n")
+        self.assertEqual(run.sh(["git", "rev-parse", "HEAD"], cwd=copy)[1], run.must_git("rev-parse", "HEAD"))
         run.starts = 3
-        self.assertTrue(run.commit("tree"))
-        self.assertEqual(messages, ["Ticket #13: t", "Ticket #13: fixes after checks or review, round 2"])
-        # a file changed after the local review: the tree is not the reviewed one, and nothing is committed
-        with self.assertRaises(runner.NeedsHuman) as stop:
-            run.commit("the tree that Qodo saw")
-        self.assertIn("changed after the Qodo local review", str(stop.exception))
-        self.assertEqual(len(messages), 2)
+        self.assertTrue(run.commit(second))
+        log = run.must_git("log", "--format=%s", "-2").splitlines()
+        self.assertEqual(log, ["Ticket #13: fixes after checks or review, round 2", "Ticket #13: t"])
 
 
 class AuditTest(unittest.TestCase):
@@ -1590,7 +1617,7 @@ class FlowTest(unittest.TestCase):
         run.base_tree = "tree-0"
         run.snapshot = lambda: "tree-%d" % tree[0]
         run.changes = lambda before, after: "M\tsrc/select.rs"
-        run.local_review = lambda criteria, recent_work=(): []
+        run.local_review = lambda criteria, recent_work, tree: []
         run.commit = lambda reviewed: True
         run.checks = lambda scope: next(checks, None)
         run.push = push
