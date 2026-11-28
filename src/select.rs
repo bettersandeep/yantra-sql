@@ -39,8 +39,105 @@ const KEYWORDS: [&str; 147] = [
 
 /// ponytail: a fixed limit on nested parentheses and unary operators.
 /// Deeper input is an error and not a stack overflow.
-/// SQLite permits a depth of 1000. Raise the limit if real queries need it.
+/// This is the engine's own limit on the recursion of the parser. It is not a limit of SQLite,
+/// and it is not the height that `MAX_EXPR_HEIGHT` bounds.
+/// SQLite 3.46.1 gives 7 for `SELECT (((7)))` with 1001 pairs of parentheses and with 1002
+/// pairs, so SQLite has no limit of 1000 there. It also accepts 999 unary minus signs.
+/// This limit stops both at 100. Raise the limit if real queries need it.
 const MAX_DEPTH: usize = 100;
+
+/// The highest number of result columns of a SELECT.
+/// https://www.sqlite.org/limits.html: "The default setting for SQLITE_MAX_COLUMN is 2000",
+/// and it bounds "the number of columns in the result set of a SELECT statement".
+/// SQLite 3.46.1 gives a row for a SELECT with 2000 columns and
+/// "too many columns in result set" for 2001.
+const MAX_COLUMNS: usize = 2000;
+
+/// The highest number of arguments of a function call.
+/// https://www.sqlite.org/limits.html, SQLITE_MAX_FUNCTION_ARG: "the default was raised to 1000
+/// beginning with SQLite version 3.48.0 (2025-01-14)".
+/// SQLite 3.46.1 has the older limit of 127, so this value is from the document only.
+const MAX_FUNCTION_ARGS: usize = 1000;
+
+/// The highest height of an expression tree.
+/// https://www.sqlite.org/limits.html: "The SQLITE_MAX_EXPR_DEPTH parameter determines the
+/// maximum expression tree depth" and "The current implementation has a default value of 1000."
+/// `Node` has the rules for the height.
+const MAX_EXPR_HEIGHT: usize = 1000;
+
+/// An expression that the parser read: its value, and its height in SQLite's expression tree.
+///
+/// The parser builds no tree, so each parse function returns the height with the value.
+/// The rules are measured on SQLite 3.46.1. `H` is an expression of height 1000 (999 `~` before
+/// a literal, or a sum of 1000 terms), and `G` is one of height 999. SQLite gives
+/// "Expression tree is too large (maximum depth 1000)" for a height above 1000.
+/// - An integer literal, `NULL` and `COUNT(*)` have height 1: `G + 1` and 999 `~` before `NULL`
+///   or before `COUNT(*)` work.
+/// - Parentheses add nothing: `(H)` works.
+/// - Unary `-`, unary `+` and `NOT` have the height of the operand plus 1: `- H`, `+ H` and
+///   `NOT H` are errors, `- G` and `NOT G` work.
+/// - A binary operator has the height of its highest operand plus 1. This holds for the
+///   arithmetic (`H + 1` is an error), for the comparisons (`H = 1`, `1 = H`, `H < 1` and
+///   `H <> 1` are errors, `G = 1` works) and for `OR` (`H OR 1`, `H OR 0` and `1 OR H` are
+///   errors, `G OR 1` works).
+///   Each comparison operator is measured on the two sides. With `H` as 999 `~` before `1` and
+///   `G` as 998 `~` before `1`: `H op 1` and `1 op H` are errors, and `G op 1` and `1 op G`
+///   work, for each `op` of `<=`, `>`, `>=`, `==` and `!=`. `1 < H` and `1 <> H` are errors,
+///   `1 < G` and `1 <> G` work.
+/// - `IS NULL` and `IS NOT NULL` have the height of the operand plus 1: `H IS NULL` and
+///   `H IS NOT NULL` are errors, the same with `G` works.
+/// - `AND` has the height of its highest operand plus 1: `H AND 1`, `1 AND H` and `H AND NULL`
+///   are errors, `G AND 1` works. There is one exception. When an operand is the integer
+///   literal 0, SQLite's parser replaces the `AND` with the literal 0, which has height 1:
+///   `H AND 0`, `0 AND H`, `H AND 00`, `H AND (0)` and `- (H AND 0)` work. The replacement is
+///   such a literal too: `H AND (1 AND 0)` and `(H AND 0) AND H` work. An expression that only
+///   has the value 0 is not the literal: `H AND - 0` and `H AND + 0` are errors.
+/// - `CAST` has the height of its operand plus 1: `CAST(H AS INTEGER)` is an error,
+///   `CAST(G AS INTEGER)` works and `- CAST(G AS INTEGER)` is an error.
+/// - `CASE` has the height of its highest part plus 1. The parts are the base, each `WHEN`,
+///   each `THEN` and the `ELSE`: `CASE WHEN H THEN 1 END`, `CASE WHEN 1 THEN H END`,
+///   `CASE WHEN 0 THEN 1 ELSE H END`, `CASE H WHEN 1 THEN 1 END`, `CASE 1 WHEN H THEN 1 END`
+///   and `CASE WHEN 0 THEN 1 WHEN 1 THEN H END` are errors, `CASE WHEN G THEN 1 END` and
+///   `CASE G WHEN 1 THEN 1 END` work.
+/// - A function call has the height of its highest argument plus 1, with or without
+///   `DISTINCT`: `COALESCE(NULL, H)`, `COALESCE(H, 1)`, `NULLIF(H, 1)`, `COUNT(H)`,
+///   `COUNT(DISTINCT H)`, `MIN(H)`, `MAX(H)` and `SUM(H)` are errors, `COALESCE(NULL, G)`,
+///   `NULLIF(1, G)`, `COUNT(G)` and `SUM(G)` work.
+#[derive(Clone, Copy)]
+struct Node {
+    /// `None` is the SQL NULL.
+    value: Option<i64>,
+    height: usize,
+    /// True when the expression is the integer literal 0 for SQLite's parser.
+    /// Only `AND` reads it.
+    zero: bool,
+}
+
+impl Node {
+    /// An expression of height 1.
+    fn leaf(value: Option<i64>) -> Node {
+        Node {
+            value,
+            height: 1,
+            zero: false,
+        }
+    }
+
+    /// An expression that is one level above operands, and `below` is the height of the
+    /// highest operand.
+    fn above(value: Option<i64>, below: usize) -> Result<Node, Error> {
+        if below >= MAX_EXPR_HEIGHT {
+            return Err(Error(format!(
+                "Expression tree is too large (maximum depth {MAX_EXPR_HEIGHT})"
+            )));
+        }
+        Ok(Node {
+            value,
+            height: below + 1,
+            zero: false,
+        })
+    }
+}
 
 fn overflow() -> Error {
     Error("integer overflow".to_string())
@@ -137,16 +234,17 @@ impl<'a> Parser<'a> {
     /// `1, 1, NULL, NULL, NULL`.
     /// A value is true when it is not 0 and not NULL: `SELECT 0 OR - 3` gives 1.
     /// The right operand is computed in each case, so an error in it is an error for the statement.
-    fn expr(&mut self) -> Result<Option<i64>, Error> {
+    fn expr(&mut self) -> Result<Node, Error> {
         let mut left = self.and()?;
         while self.keyword("OR") {
             let right = self.and()?;
-            left = match (left, right) {
+            let value = match (left.value, right.value) {
                 (Some(a), _) if a != 0 => Some(1),
                 (_, Some(b)) if b != 0 => Some(1),
                 (Some(_), Some(_)) => Some(0),
                 _ => None,
             };
+            left = Node::above(value, left.height.max(right.height))?;
         }
         Ok(left)
     }
@@ -157,15 +255,27 @@ impl<'a> Parser<'a> {
     /// `0, 0, NULL, NULL, NULL`, and `SELECT 2 AND - 3` gives 1.
     /// There is no level for `NOT` between this one and `equality`.
     /// A `NOT` is read in `unary`, and the comment there says why.
-    fn and(&mut self) -> Result<Option<i64>, Error> {
+    ///
+    /// An `AND` with the integer literal 0 as an operand is the literal 0 for SQLite's parser,
+    /// with height 1. The comment of `Node` has the queries.
+    fn and(&mut self) -> Result<Node, Error> {
         let mut left = self.equality()?;
         while self.keyword("AND") {
             let right = self.equality()?;
-            left = match (left, right) {
+            if left.zero || right.zero {
+                left = Node {
+                    value: Some(0),
+                    height: 1,
+                    zero: true,
+                };
+                continue;
+            }
+            let value = match (left.value, right.value) {
                 (Some(0), _) | (_, Some(0)) => Some(0),
                 (Some(_), Some(_)) => Some(1),
                 _ => None,
             };
+            left = Node::above(value, left.height.max(right.height))?;
         }
         Ok(left)
     }
@@ -180,12 +290,16 @@ impl<'a> Parser<'a> {
     /// An operator of a higher row after that `NULL` belongs to the right side:
     /// SQLite 3.46.1 reads `1 IS NULL + 1` as `1 IS (NULL + 1)` and gives 0.
     /// That is an error here. So are `IS DISTINCT FROM` and each other right side.
-    fn equality(&mut self) -> Result<Option<i64>, Error> {
+    fn equality(&mut self) -> Result<Node, Error> {
         let mut left = self.comparison()?;
         loop {
             if let Some(op @ (Token::Equal | Token::NotEqual)) = self.peek() {
                 self.pos += 1;
-                left = compare(op, left, self.comparison()?)?;
+                let right = self.comparison()?;
+                left = Node::above(
+                    compare(op, left.value, right.value)?,
+                    left.height.max(right.height),
+                )?;
             } else if self.keyword("IS") {
                 let not = self.keyword("NOT");
                 if !self.keyword("NULL") {
@@ -209,7 +323,7 @@ impl<'a> Parser<'a> {
                         "IS with a right side that is not NULL is not supported".to_string(),
                     ));
                 }
-                left = Some(i64::from(left.is_none() != not));
+                left = Node::above(Some(i64::from(left.value.is_none() != not)), left.height)?;
             } else {
                 return Ok(left);
             }
@@ -219,34 +333,46 @@ impl<'a> Parser<'a> {
     /// `sum {(< | <= | > | >=) sum}`
     ///
     /// SQLite 3.46.1: `SELECT 1 < 2 < 3, 3 > 2 > 1, 1 = 2 < 3, 0 = 1 < 2` gives `1, 0, 1, 0`.
-    fn comparison(&mut self) -> Result<Option<i64>, Error> {
+    fn comparison(&mut self) -> Result<Node, Error> {
         let mut left = self.sum()?;
         while let Some(
             op @ (Token::Less | Token::LessEqual | Token::Greater | Token::GreaterEqual),
         ) = self.peek()
         {
             self.pos += 1;
-            left = compare(op, left, self.sum()?)?;
+            let right = self.sum()?;
+            left = Node::above(
+                compare(op, left.value, right.value)?,
+                left.height.max(right.height),
+            )?;
         }
         Ok(left)
     }
 
     /// `term {(+ | -) term}`
-    fn sum(&mut self) -> Result<Option<i64>, Error> {
+    fn sum(&mut self) -> Result<Node, Error> {
         let mut left = self.term()?;
         while let Some(op @ (Token::Plus | Token::Minus)) = self.peek() {
             self.pos += 1;
-            left = apply(op, left, self.term()?)?;
+            let right = self.term()?;
+            left = Node::above(
+                apply(op, left.value, right.value)?,
+                left.height.max(right.height),
+            )?;
         }
         Ok(left)
     }
 
     /// `unary {(* | / | %) unary}`
-    fn term(&mut self) -> Result<Option<i64>, Error> {
+    fn term(&mut self) -> Result<Node, Error> {
         let mut left = self.unary()?;
         while let Some(op @ (Token::Star | Token::Slash | Token::Percent)) = self.peek() {
             self.pos += 1;
-            left = apply(op, left, self.unary()?)?;
+            let right = self.unary()?;
+            left = Node::above(
+                apply(op, left.value, right.value)?,
+                left.height.max(right.height),
+            )?;
         }
         Ok(left)
     }
@@ -257,7 +383,7 @@ impl<'a> Parser<'a> {
     /// `COUNT ( * )` and `(COUNT | MIN | MAX | SUM) ( [ALL | DISTINCT] expr )` are from
     /// https://www.sqlite.org/lang_aggfunc.html.
     /// A SELECT without FROM has one row, so each aggregate sees one value.
-    fn call(&mut self, name: &str) -> Result<Option<i64>, Error> {
+    fn call(&mut self, name: &str) -> Result<Node, Error> {
         let function = name.to_ascii_uppercase();
         let aggregate = matches!(function.as_str(), "COUNT" | "MIN" | "MAX" | "SUM");
         if !aggregate && function != "COALESCE" && function != "NULLIF" {
@@ -274,7 +400,7 @@ impl<'a> Parser<'a> {
                 && self.tokens[self.pos..].starts_with(&[Token::Star, Token::RightParen])
             {
                 self.pos += 2;
-                return Ok(Some(1));
+                return Ok(Node::leaf(Some(1)));
             }
             // One value has no duplicates, so DISTINCT changes nothing.
             if !self.keyword("ALL") {
@@ -283,8 +409,16 @@ impl<'a> Parser<'a> {
             self.in_aggregate = true;
         }
         let mut args = Vec::new();
+        // The height of the highest argument.
+        let mut below = 0;
         loop {
-            args.push(self.expr()?);
+            let arg = self.expr()?;
+            below = below.max(arg.height);
+            args.push(arg.value);
+            // The source of the limit is at `MAX_FUNCTION_ARGS`.
+            if args.len() > MAX_FUNCTION_ARGS {
+                return Err(Error(format!("too many arguments on function {name}")));
+            }
             match self.peek() {
                 Some(Token::Comma) => self.pos += 1,
                 Some(Token::RightParen) => break,
@@ -295,27 +429,38 @@ impl<'a> Parser<'a> {
         if aggregate {
             self.in_aggregate = false;
         }
-        match (function.as_str(), &args[..]) {
+        let value = match (function.as_str(), &args[..]) {
             // The first argument that is not NULL, or NULL.
-            ("COALESCE", [_, _, ..]) => Ok(args.iter().find_map(|arg| *arg)),
+            ("COALESCE", [_, _, ..]) => args.iter().find_map(|arg| *arg),
             // NULL if the arguments are the same, else the first argument.
             // If `a` is NULL, the two branches give the same result.
             // If only `b` is NULL, the arguments are different.
-            ("NULLIF", [a, b]) => Ok(if a == b { None } else { *a }),
+            ("NULLIF", [a, b]) => {
+                if a == b {
+                    None
+                } else {
+                    *a
+                }
+            }
             // The number of values that are not NULL.
-            ("COUNT", [arg]) => Ok(Some(i64::from(arg.is_some()))),
+            ("COUNT", [arg]) => Some(i64::from(arg.is_some())),
             // The minimum, the maximum and the sum of one value are that value.
             // Each one is NULL when there is no value that is not NULL.
-            ("MIN" | "MAX" | "SUM", [arg]) => Ok(*arg),
+            ("MIN" | "MAX" | "SUM", [arg]) => *arg,
             // With two or more arguments, these are scalar functions in SQLite.
             // See `max(X,Y,...)` in https://www.sqlite.org/lang_corefunc.html.
-            ("MIN" | "MAX", [_, _, ..]) => Err(Error(format!(
-                "the function {name} with more than one argument is not supported"
-            ))),
-            _ => Err(Error(format!(
-                "wrong number of arguments to function {name}"
-            ))),
-        }
+            ("MIN" | "MAX", [_, _, ..]) => {
+                return Err(Error(format!(
+                    "the function {name} with more than one argument is not supported"
+                )));
+            }
+            _ => {
+                return Err(Error(format!(
+                    "wrong number of arguments to function {name}"
+                )));
+            }
+        };
+        Node::above(value, below)
     }
 
     /// `CAST ( expr AS INTEGER )`. The parser is at `CAST`, and the next token is `(`.
@@ -325,9 +470,9 @@ impl<'a> Parser<'a> {
     /// `SELECT CAST(1 AS INTEGER), CAST(- 5 AS INTEGER), CAST(NULL AS INTEGER)`,
     /// so the cast returns its argument without change.
     /// SQLite accepts each type name, and also no type name. Only `INTEGER` is supported here.
-    fn cast(&mut self) -> Result<Option<i64>, Error> {
+    fn cast(&mut self) -> Result<Node, Error> {
         self.pos += 2;
-        let value = self.expr()?;
+        let operand = self.expr()?;
         if !self.keyword("AS") {
             return Err(self.unexpected());
         }
@@ -342,7 +487,7 @@ impl<'a> Parser<'a> {
             return Err(self.unexpected());
         }
         self.pos += 1;
-        Ok(value)
+        Node::above(operand.value, operand.height)
     }
 
     /// `CASE [expr] WHEN expr THEN expr {WHEN expr THEN expr} [ELSE expr] END`.
@@ -363,12 +508,16 @@ impl<'a> Parser<'a> {
     /// ELSE, for a WHEN after the ELSE and for a missing END.
     ///
     /// Each part is computed, so an error in a part that SQLite does not compute is an error here.
-    fn case(&mut self) -> Result<Option<i64>, Error> {
+    fn case(&mut self) -> Result<Node, Error> {
         self.pos += 1;
+        // The height of the highest part.
+        let mut below = 0;
         let base = if self.at("WHEN") {
             None
         } else {
-            Some(self.expr()?)
+            let base = self.expr()?;
+            below = base.height;
+            Some(base.value)
         };
         if !self.at("WHEN") {
             return Err(self.unexpected());
@@ -381,47 +530,59 @@ impl<'a> Parser<'a> {
                 return Err(self.unexpected());
             }
             let then = self.expr()?;
+            below = below.max(when.height).max(then.height);
             let matched = match base {
-                None => when.is_some_and(|v| v != 0),
-                Some(base) => base.is_some() && base == when,
+                None => when.value.is_some_and(|v| v != 0),
+                Some(base) => base.is_some() && base == when.value,
             };
             if matched && found.is_none() {
-                found = Some(then);
+                found = Some(then.value);
             }
         }
         let otherwise = if self.keyword("ELSE") {
-            self.expr()?
+            let otherwise = self.expr()?;
+            below = below.max(otherwise.height);
+            otherwise.value
         } else {
             None
         };
         if !self.keyword("END") {
             return Err(self.unexpected());
         }
-        Ok(found.unwrap_or(otherwise))
+        Node::above(found.unwrap_or(otherwise), below)
     }
 
     /// `+ unary`, `- unary`, `NOT equality`, an integer literal, `NULL`, `( expr )`, a `CASE`, a `CAST` or a function call.
     /// Each recursion of the parser goes through this function.
-    fn unary(&mut self) -> Result<Option<i64>, Error> {
+    fn unary(&mut self) -> Result<Node, Error> {
         if self.depth == MAX_DEPTH {
             return Err(Error("the expression is nested too deep".to_string()));
         }
         self.depth += 1;
-        let value = match self.peek() {
+        let node = match self.peek() {
             Some(Token::Plus) => {
                 self.pos += 1;
-                self.unary()?
+                let operand = self.unary()?;
+                Node::above(operand.value, operand.height)?
             }
             Some(Token::Minus) => {
                 self.pos += 1;
-                match self.unary()? {
+                let operand = self.unary()?;
+                let value = match operand.value {
                     Some(v) => Some(v.checked_neg().ok_or_else(overflow)?),
                     None => None,
-                }
+                };
+                Node::above(value, operand.height)?
             }
+            // Each spelling of zero is the literal 0 for SQLite's parser:
+            // the comment of `Node` has the queries with `0`, `00` and `(0)`.
             Some(Token::Integer(v)) => {
                 self.pos += 1;
-                Some(v)
+                Node {
+                    value: Some(v),
+                    height: 1,
+                    zero: v == 0,
+                }
             }
             // `NOT` takes each operator of a higher row into its operand, and stops before
             // `AND` and `OR`. That is its row in the precedence table.
@@ -434,11 +595,12 @@ impl<'a> Parser<'a> {
             // `NOT NULL` is NULL, `NOT 0` is 1, and `NOT` of each other value is 0.
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NOT") => {
                 self.pos += 1;
-                self.equality()?.map(|v| i64::from(v == 0))
+                let operand = self.equality()?;
+                Node::above(operand.value.map(|v| i64::from(v == 0)), operand.height)?
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 self.pos += 1;
-                None
+                Node::leaf(None)
             }
             // This arm is before the function call, because `CASE (1) WHEN ...` is not a call.
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("CASE") => self.case()?,
@@ -449,19 +611,20 @@ impl<'a> Parser<'a> {
                     self.call(name)?
                 }
             }
+            // Parentheses add no height, and `(0)` is still the literal 0.
             Some(Token::LeftParen) => {
                 self.pos += 1;
-                let v = self.expr()?;
+                let inner = self.expr()?;
                 if self.peek() != Some(Token::RightParen) {
                     return Err(self.unexpected());
                 }
                 self.pos += 1;
-                v
+                inner
             }
             _ => return Err(self.unexpected()),
         };
         self.depth -= 1;
-        Ok(value)
+        Ok(node)
     }
 }
 
@@ -484,7 +647,11 @@ pub fn select(sql: &str) -> Result<Vec<Value>, Error> {
     }
     let mut row = Vec::new();
     loop {
-        row.push(parser.expr()?.map_or(Value::Null, Value::Integer));
+        row.push(parser.expr()?.value.map_or(Value::Null, Value::Integer));
+        // The source of the limit is at `MAX_COLUMNS`.
+        if row.len() > MAX_COLUMNS {
+            return Err(Error("too many columns in result set".to_string()));
+        }
         // The alias has no effect on the result.
         let has_as = parser.keyword("AS");
         match parser.peek() {
@@ -1695,5 +1862,185 @@ mod tests {
         };
         assert_eq!(run(&calls(MAX_DEPTH - 1)), ints(&[7]));
         assert!(select(&calls(MAX_DEPTH)).is_err());
+    }
+
+    /// A sum of `terms` terms. Its height in SQLite's expression tree is `terms`.
+    fn sum_of(terms: usize) -> String {
+        vec!["1"; terms].join(" + ")
+    }
+
+    const TOO_HIGH: &str = "Expression tree is too large (maximum depth 1000)";
+
+    #[test]
+    fn column_limit() {
+        let columns = |count: usize| format!("SELECT {}", vec!["1"; count].join(", "));
+        assert_eq!(run(&columns(MAX_COLUMNS)), ints(&[1; MAX_COLUMNS]));
+        assert_eq!(
+            select(&columns(MAX_COLUMNS + 1)).unwrap_err().to_string(),
+            "too many columns in result set"
+        );
+        assert_eq!(MAX_COLUMNS, 2000);
+    }
+
+    #[test]
+    fn function_argument_limit() {
+        let call = |count: usize| format!("SELECT COALESCE(NULL{})", ", 7".repeat(count - 1));
+        assert_eq!(run(&call(MAX_FUNCTION_ARGS)), ints(&[7]));
+        assert_eq!(
+            select(&call(MAX_FUNCTION_ARGS + 1))
+                .unwrap_err()
+                .to_string(),
+            "too many arguments on function COALESCE"
+        );
+        assert_eq!(MAX_FUNCTION_ARGS, 1000);
+    }
+
+    #[test]
+    fn height_limit_of_the_ticket() {
+        assert_eq!(run(&format!("SELECT {}", sum_of(1000))), ints(&[1000]));
+        assert_eq!(
+            select(&format!("SELECT {}", sum_of(1001)))
+                .unwrap_err()
+                .to_string(),
+            TOO_HIGH
+        );
+        assert_eq!(
+            run(&format!("SELECT COALESCE(NULL, {})", sum_of(999))),
+            ints(&[999])
+        );
+        assert_eq!(
+            select(&format!("SELECT COALESCE(NULL, {})", sum_of(1000)))
+                .unwrap_err()
+                .to_string(),
+            TOO_HIGH
+        );
+        // SQLite accepts 999 unary minus signs before a literal, and 1000 are an error there.
+        // The engine's own nesting limit stops both.
+        for count in [999, 1000] {
+            assert_eq!(
+                select(&format!("SELECT {}1", "- ".repeat(count)))
+                    .unwrap_err()
+                    .to_string(),
+                "the expression is nested too deep"
+            );
+        }
+        // Each chain of binary operators is a loop in the parser, and each one has a height.
+        for op in ["*", "=", "<", "AND", "OR"] {
+            let chain =
+                |terms: usize| format!("SELECT {}", vec!["1"; terms].join(&format!(" {op} ")));
+            assert!(select(&chain(1000)).is_ok(), "{op}");
+            assert_eq!(select(&chain(1001)).unwrap_err().to_string(), TOO_HIGH);
+        }
+        let is_null = |count: usize| format!("SELECT 1{}", " IS NULL".repeat(count));
+        assert_eq!(run(&is_null(999)), ints(&[0]));
+        assert_eq!(select(&is_null(1000)).unwrap_err().to_string(), TOO_HIGH);
+    }
+
+    // The comment of `Node` has the answers of SQLite 3.46.1 for these statements.
+    // There the deep operand is a chain of `~`, which this engine does not support.
+    #[test]
+    fn height_of_each_expression() {
+        // Height 999 and height 1000.
+        let (g, h) = (sum_of(999), sum_of(1000));
+        for (sql, expected) in [
+            (format!("SELECT ({h})"), Some(1000)),
+            (format!("SELECT - ({g})"), Some(-999)),
+            (format!("SELECT + ({g})"), Some(999)),
+            (format!("SELECT NOT {g}"), Some(0)),
+            (format!("SELECT NULL + {g}"), None),
+            (format!("SELECT COUNT(*) + {g}"), Some(1000)),
+            (format!("SELECT (0) + {g}"), Some(999)),
+            (format!("SELECT {g} = 1"), Some(0)),
+            (format!("SELECT {g} IS NULL"), Some(0)),
+            (format!("SELECT {g} IS NOT NULL"), Some(1)),
+            (format!("SELECT {g} AND 1"), Some(1)),
+            (format!("SELECT {g} OR 1"), Some(1)),
+            (format!("SELECT CAST({g} AS INTEGER)"), Some(999)),
+            (format!("SELECT CASE WHEN {g} THEN 1 END"), Some(1)),
+            (format!("SELECT CASE {g} WHEN 999 THEN 7 END"), Some(7)),
+            (format!("SELECT CASE WHEN 1 THEN {g} END"), Some(999)),
+            (format!("SELECT COALESCE(NULL, {g})"), Some(999)),
+            (format!("SELECT NULLIF(1, {g})"), Some(1)),
+            (format!("SELECT COUNT({g})"), Some(1)),
+            (format!("SELECT COUNT(DISTINCT {g})"), Some(1)),
+            (format!("SELECT SUM({g})"), Some(999)),
+            // An AND with the integer literal 0 is the literal 0, with height 1.
+            (format!("SELECT {h} AND 0"), Some(0)),
+            (format!("SELECT 0 AND {h}"), Some(0)),
+            (format!("SELECT {h} AND 00"), Some(0)),
+            (format!("SELECT {h} AND (0)"), Some(0)),
+            (format!("SELECT {h} AND ((0))"), Some(0)),
+            (format!("SELECT {h} AND (1 AND 0)"), Some(0)),
+            (format!("SELECT ({h} AND 0) AND {h}"), Some(0)),
+            (format!("SELECT - ({h} AND 0)"), Some(0)),
+            (format!("SELECT NULL AND 0 AND {h}"), Some(0)),
+        ] {
+            assert_eq!(run(&sql), vals(&[expected]), "{sql}");
+        }
+        for sql in [
+            format!("SELECT - ({h})"),
+            format!("SELECT + ({h})"),
+            format!("SELECT NOT {h}"),
+            format!("SELECT - 1 + {g}"),
+            format!("SELECT COUNT(1) + {g}"),
+            format!("SELECT CAST(1 AS INTEGER) + {g}"),
+            format!("SELECT {h} = 1"),
+            format!("SELECT 1 = {h}"),
+            format!("SELECT {h} < 1"),
+            format!("SELECT {h} <> 1"),
+            format!("SELECT {h} IS NULL"),
+            format!("SELECT {h} IS NOT NULL"),
+            format!("SELECT {h} AND 1"),
+            format!("SELECT 1 AND {h}"),
+            format!("SELECT {h} AND NULL"),
+            format!("SELECT {h} AND - 0"),
+            format!("SELECT {h} AND + 0"),
+            format!("SELECT {h} OR 1"),
+            format!("SELECT {h} OR 0"),
+            format!("SELECT 1 OR {h}"),
+            format!("SELECT CAST({h} AS INTEGER)"),
+            format!("SELECT - CAST({g} AS INTEGER)"),
+            format!("SELECT CASE WHEN {h} THEN 1 END"),
+            format!("SELECT CASE WHEN 1 THEN {h} END"),
+            format!("SELECT CASE WHEN 0 THEN 1 ELSE {h} END"),
+            format!("SELECT CASE {h} WHEN 1 THEN 1 END"),
+            format!("SELECT CASE 1 WHEN {h} THEN 1 END"),
+            format!("SELECT CASE WHEN 0 THEN 1 WHEN 1 THEN {h} END"),
+            format!("SELECT COALESCE(NULL, {h})"),
+            format!("SELECT COALESCE({h}, 1)"),
+            format!("SELECT NULLIF({h}, 1)"),
+            format!("SELECT COUNT({h})"),
+            format!("SELECT COUNT(DISTINCT {h})"),
+            format!("SELECT MIN({h})"),
+            format!("SELECT MAX({h})"),
+            format!("SELECT SUM({h})"),
+            format!("SELECT 1, {h} + 1"),
+        ] {
+            assert_eq!(select(&sql).unwrap_err().to_string(), TOO_HIGH, "{sql}");
+        }
+    }
+
+    // Each comparison operator on the two sides. The comment of `Node` has the answers of
+    // SQLite 3.46.1: a height of 1000 on one side is an error, and a height of 999 works.
+    #[test]
+    fn height_of_each_comparison_operator() {
+        let (g, h) = (sum_of(999), sum_of(1000));
+        // The values of `999 op 1` and of `1 op 999`.
+        for (op, left, right) in [
+            ("=", 0, 0),
+            ("==", 0, 0),
+            ("<>", 1, 1),
+            ("!=", 1, 1),
+            ("<", 0, 1),
+            ("<=", 0, 1),
+            (">", 1, 0),
+            (">=", 1, 0),
+        ] {
+            assert_eq!(run(&format!("SELECT {g} {op} 1")), ints(&[left]), "{op}");
+            assert_eq!(run(&format!("SELECT 1 {op} {g}")), ints(&[right]), "{op}");
+            for sql in [format!("SELECT {h} {op} 1"), format!("SELECT 1 {op} {h}")] {
+                assert_eq!(select(&sql).unwrap_err().to_string(), TOO_HIGH, "{op}");
+            }
+        }
     }
 }
