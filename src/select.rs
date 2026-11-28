@@ -6,6 +6,9 @@
 //! SQLite 3.49.1 does not compute the arguments of `COALESCE` after the first one that is not NULL:
 //! `SELECT COALESCE(1, abs(-9223372036854775807 - 1))` gives 1 there and an error here.
 //! A `CAST` is not a function call. Its only supported target type is `INTEGER`.
+//! Each part of a `CASE` is computed too, by the same decision as for `COALESCE`.
+//! SQLite 3.46.1 does not compute the parts after the first match:
+//! `SELECT CASE WHEN 1 THEN 2 ELSE abs(-9223372036854775807 - 1) END` gives 2 there and an error here.
 
 use crate::lexer::{Token, lex};
 use crate::{Error, Value};
@@ -108,9 +111,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True if the next token is `keyword`.
+    fn at(&self, keyword: &str) -> bool {
+        matches!(self.peek(), Some(Token::Word(w)) if w.eq_ignore_ascii_case(keyword))
+    }
+
     /// Consumes the next token if it is `keyword`.
     fn keyword(&mut self, keyword: &str) -> bool {
-        let found = matches!(self.peek(), Some(Token::Word(w)) if w.eq_ignore_ascii_case(keyword));
+        let found = self.at(keyword);
         if found {
             self.pos += 1;
         }
@@ -337,7 +345,62 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    /// `+ unary`, `- unary`, `NOT equality`, an integer literal, `NULL`, `( expr )`, a `CAST` or a function call.
+    /// `CASE [expr] WHEN expr THEN expr {WHEN expr THEN expr} [ELSE expr] END`.
+    /// The parser is at `CASE`.
+    /// The rules are from section 7 of https://www.sqlite.org/lang_expr.html:
+    /// - Without a base, the result is the THEN of the first WHEN that is true.
+    ///   "A NULL result is considered untrue when evaluating WHEN terms."
+    /// - With a base, the base and each WHEN are the two operands of `=`,
+    ///   so a NULL base or a NULL WHEN never matches.
+    /// - With no match, the result is the ELSE, or NULL when there is no ELSE.
+    ///
+    /// SQLite 3.46.1 gives `2, NULL, 3, 2, 2, NULL, 2, 2, 5` for
+    /// `SELECT CASE WHEN 1 THEN 2 END, CASE WHEN 0 THEN 2 END, CASE WHEN NULL THEN 2 ELSE 3 END,
+    /// CASE WHEN - 1 THEN 2 ELSE 3 END, CASE 1 WHEN 1 THEN 2 END, CASE 1 WHEN 2 THEN 3 END,
+    /// CASE NULL WHEN NULL THEN 1 ELSE 2 END, CASE 1 WHEN NULL THEN 1 ELSE 2 END,
+    /// CASE 1 WHEN NULL THEN 1 WHEN 1 THEN 5 END`.
+    /// It gives a syntax error for a CASE with no WHEN, for a WHEN with no THEN, for a second
+    /// ELSE, for a WHEN after the ELSE and for a missing END.
+    ///
+    /// Each part is computed, so an error in a part that SQLite does not compute is an error here.
+    fn case(&mut self) -> Result<Option<i64>, Error> {
+        self.pos += 1;
+        let base = if self.at("WHEN") {
+            None
+        } else {
+            Some(self.expr()?)
+        };
+        if !self.at("WHEN") {
+            return Err(self.unexpected());
+        }
+        // The THEN of the first WHEN that matched.
+        let mut found = None;
+        while self.keyword("WHEN") {
+            let when = self.expr()?;
+            if !self.keyword("THEN") {
+                return Err(self.unexpected());
+            }
+            let then = self.expr()?;
+            let matched = match base {
+                None => when.is_some_and(|v| v != 0),
+                Some(base) => base.is_some() && base == when,
+            };
+            if matched && found.is_none() {
+                found = Some(then);
+            }
+        }
+        let otherwise = if self.keyword("ELSE") {
+            self.expr()?
+        } else {
+            None
+        };
+        if !self.keyword("END") {
+            return Err(self.unexpected());
+        }
+        Ok(found.unwrap_or(otherwise))
+    }
+
+    /// `+ unary`, `- unary`, `NOT equality`, an integer literal, `NULL`, `( expr )`, a `CASE`, a `CAST` or a function call.
     /// Each recursion of the parser goes through this function.
     fn unary(&mut self) -> Result<Option<i64>, Error> {
         if self.depth == MAX_DEPTH {
@@ -377,6 +440,8 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 None
             }
+            // This arm is before the function call, because `CASE (1) WHEN ...` is not a call.
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("CASE") => self.case()?,
             Some(Token::Word(name)) if self.tokens.get(self.pos + 1) == Some(&Token::LeftParen) => {
                 if name.eq_ignore_ascii_case("CAST") {
                     self.cast()?
@@ -1286,6 +1351,247 @@ mod tests {
         }
     }
 
+    // The expected values of the `case_` tests are the answers of SQLite 3.46.1 for the same
+    // statements, except where a comment says that SQLite gives a value and this engine an error.
+    #[test]
+    fn case_without_a_base_takes_the_first_true_when() {
+        assert_eq!(
+            run(
+                "SELECT CASE WHEN 1 THEN 2 END, CASE WHEN 0 THEN 2 END, CASE WHEN NULL THEN 2 END, \
+                 CASE WHEN NULL THEN 2 ELSE 3 END, CASE WHEN - 1 THEN 2 ELSE 3 END, \
+                 CASE WHEN 0 THEN 2 ELSE 3 END"
+            ),
+            vals(&[Some(2), None, None, Some(3), Some(2), Some(3)])
+        );
+        assert_eq!(
+            run(
+                "SELECT CASE WHEN 0 THEN 1 WHEN 1 THEN 2 WHEN 1 THEN 3 ELSE 4 END, \
+                 CASE WHEN 0 THEN 1 WHEN NULL THEN 2 ELSE 4 END, \
+                 CASE WHEN 0 THEN 1 WHEN NULL THEN 2 END, CASE WHEN 5 THEN NULL ELSE 4 END, \
+                 CASE WHEN 1 THEN 2 ELSE NULL END"
+            ),
+            vals(&[Some(2), Some(4), None, None, Some(2)])
+        );
+        assert_eq!(
+            run("SELECT CASE WHEN 1 IS NULL THEN 1 ELSE 2 END, \
+                 CASE WHEN NULL IS NULL THEN 1 ELSE 2 END, CASE 1 IS NULL WHEN 0 THEN 3 END, \
+                 CASE WHEN NOT 0 THEN NOT 1 ELSE NOT NULL END"),
+            ints(&[2, 1, 3, 0])
+        );
+    }
+
+    #[test]
+    fn case_with_a_base_takes_the_first_equal_when() {
+        assert_eq!(
+            run(
+                "SELECT CASE 1 WHEN 1 THEN 2 END, CASE 1 WHEN 2 THEN 3 END, \
+                 CASE 1 WHEN 2 THEN 3 ELSE 4 END, \
+                 CASE 3 WHEN 1 THEN 10 WHEN 3 THEN 30 WHEN 3 THEN 31 ELSE 40 END, \
+                 CASE 0 WHEN 0 THEN 7 END"
+            ),
+            vals(&[Some(2), None, Some(4), Some(30), Some(7)])
+        );
+        // A NULL base or a NULL value never matches.
+        assert_eq!(
+            run(
+                "SELECT CASE NULL WHEN NULL THEN 1 ELSE 2 END, CASE NULL WHEN NULL THEN 1 END, \
+                 CASE 1 WHEN NULL THEN 1 ELSE 2 END, CASE NULL WHEN 1 THEN 1 ELSE 2 END, \
+                 CASE 1 WHEN NULL THEN 1 WHEN 1 THEN 5 END, \
+                 CASE 1 / 0 WHEN 1 / 0 THEN 1 ELSE 2 END"
+            ),
+            vals(&[Some(2), None, Some(2), Some(2), Some(5), Some(2)])
+        );
+        // The base and each value are full expressions.
+        assert_eq!(
+            run(
+                "SELECT CASE 2 WHEN 1 = 1 THEN 5 ELSE 6 END, CASE 1 WHEN 1 = 1 THEN 5 ELSE 6 END, \
+                 CASE 1 + 1 WHEN 2 THEN 3 END, CASE NOT 0 WHEN 1 THEN 5 END, \
+                 CASE 1 = 1 WHEN 1 THEN 5 END, CASE 0 OR 1 WHEN 1 THEN 5 END"
+            ),
+            ints(&[6, 5, 3, 5, 5, 5])
+        );
+    }
+
+    #[test]
+    fn case_with_each_other_expression() {
+        assert_eq!(
+            run(
+                "SELECT 1 + CASE WHEN 1 THEN 2 END * 3, - CASE WHEN 1 THEN 2 END, \
+                 NOT CASE WHEN 1 THEN 2 END, CASE WHEN 1 THEN 2 END IS NULL, \
+                 CASE WHEN 0 THEN 2 END IS NULL, CASE WHEN 1 THEN 2 END = 2, \
+                 (CASE WHEN 1 THEN 2 END)"
+            ),
+            ints(&[7, -2, 0, 0, 1, 1, 2])
+        );
+        assert_eq!(
+            run(
+                "SELECT CASE WHEN 1 THEN 2 END + 1, CASE WHEN 1 THEN 2 ELSE 3 END * 4, \
+                 CASE WHEN 0 THEN 2 ELSE 3 + 4 END * 2, CASE WHEN 1 THEN 2 + 3 ELSE 9 END, \
+                 CASE WHEN 1 = 2 OR 3 < 4 THEN 1 AND 0 ELSE 9 END"
+            ),
+            ints(&[3, 8, 14, 5, 0])
+        );
+        assert_eq!(
+            run(
+                "SELECT 2 * CASE WHEN 1 THEN 3 END + 1, 10 - CASE 1 WHEN 1 THEN 3 END - 1, \
+                 1 < CASE WHEN 1 THEN 3 END, CASE WHEN 1 THEN 0 END OR 1, \
+                 1 AND CASE WHEN 1 THEN 0 END"
+            ),
+            ints(&[7, 6, 1, 1, 0])
+        );
+        // A CASE inside a CASE, in each part.
+        assert_eq!(
+            run(
+                "SELECT CASE WHEN CASE WHEN 1 THEN 0 END THEN 1 ELSE CASE 2 WHEN 2 THEN 22 END END, \
+                 CASE CASE 1 WHEN 1 THEN 2 END WHEN CASE WHEN 1 THEN 2 END \
+                 THEN CASE WHEN 0 THEN 1 ELSE 8 END END"
+            ),
+            ints(&[22, 8])
+        );
+        assert_eq!(
+            run("SELECT CASE WHEN COUNT(*) THEN MAX(3) ELSE MIN(4) END, \
+                 CASE COUNT(*) WHEN 1 THEN SUM(5) END, MAX(CASE WHEN 1 THEN 2 END), \
+                 COUNT(CASE WHEN 0 THEN 2 END), SUM(DISTINCT CASE 1 WHEN 1 THEN 6 END)"),
+            ints(&[3, 5, 2, 0, 6])
+        );
+        assert_eq!(
+            run(
+                "SELECT COALESCE(CASE WHEN 0 THEN 1 END, 7), NULLIF(CASE WHEN 1 THEN 1 END, 1), \
+                 CAST(CASE WHEN 1 THEN 4 END AS INTEGER), \
+                 CASE WHEN COALESCE(NULL, 1) THEN NULLIF(1, 2) ELSE CAST(3 AS INTEGER) END"
+            ),
+            vals(&[Some(7), None, Some(4), Some(1)])
+        );
+        // A CASE does not hide an aggregate that is inside an aggregate.
+        for sql in [
+            "SELECT MAX(CASE WHEN 1 THEN COUNT(*) END)",
+            "SELECT CASE WHEN MAX(COUNT(*)) THEN 1 END",
+            "SELECT SUM(CASE COUNT(*) WHEN 1 THEN 2 END)",
+            "SELECT MIN(CASE WHEN 0 THEN 1 ELSE COUNT(*) END)",
+        ] {
+            assert_eq!(
+                select(sql).unwrap_err().to_string(),
+                "misuse of aggregate function COUNT"
+            );
+        }
+        // Three records of `random/expr/slt_good_0.test`, lines 93, 199 and 1576.
+        assert_eq!(
+            run(
+                "SELECT ALL 74 * - COALESCE ( + CASE - CASE WHEN NOT ( NOT - 79 >= NULL ) THEN 48 \
+                 END WHEN + + COUNT ( * ) THEN 6 END, MIN ( ALL + - 30 ) * 45 * 77 ) * - 14"
+            ),
+            ints(&[-107692200])
+        );
+        assert_eq!(
+            run(
+                "SELECT 58 + + 78 + - COALESCE ( ( + CASE 68 WHEN - 77 - - 38 THEN NULL ELSE \
+                 COUNT ( * ) END ), + 81 + - COUNT ( * ) + + CAST ( NULL AS INTEGER ), \
+                 + + 34 * - 30 * + COUNT ( * ) ) * 15 * 38 AS col1"
+            ),
+            ints(&[-434])
+        );
+        assert_eq!(
+            run("SELECT ALL CASE 64 WHEN + 89 THEN + - 61 END - - 17 AS col2"),
+            [Value::Null]
+        );
+        // Each CASE is one level of nesting.
+        let cases = |depth: usize| {
+            let (open, close) = ("CASE WHEN 1 THEN ".repeat(depth), " END".repeat(depth));
+            format!("SELECT {open}7{close}")
+        };
+        assert_eq!(run(&cases(MAX_DEPTH - 1)), ints(&[7]));
+        assert!(select(&cases(MAX_DEPTH)).is_err());
+        assert!(select(&cases(100_000)).is_err());
+    }
+
+    #[test]
+    fn case_keywords_ignore_case_and_white_space() {
+        assert_eq!(
+            run(
+                "SELECT case when 1 then 2 else 3 end, CaSe 1 wHeN 1 tHeN 2 eLsE 3 EnD, \
+                 CASE(1)WHEN(1)THEN(2)ELSE(3)END, CASE WHEN 1 THEN 2 END AS x, \
+                 CASE WHEN 1 THEN 2 END y, CASE\t\r\nWHEN\n0\nTHEN\n1\nELSE\n5\nEND"
+            ),
+            ints(&[2, 2, 2, 2, 2, 5])
+        );
+    }
+
+    #[test]
+    fn case_errors() {
+        for sql in [
+            // SQLite gives an error for each one up to `SELECT 1 AS when`.
+            "SELECT CASE END",
+            "SELECT CASE 1 END",
+            "SELECT CASE ELSE 1 END",
+            "SELECT CASE 1 ELSE 1 END",
+            "SELECT CASE WHEN 1 END",
+            "SELECT CASE WHEN 1 THEN END",
+            "SELECT CASE WHEN THEN 1 END",
+            "SELECT CASE WHEN 1 THEN 2",
+            "SELECT CASE WHEN 1 THEN 2 ELSE 3",
+            "SELECT CASE WHEN 1 THEN 2 ELSE END",
+            "SELECT CASE WHEN 1 THEN 2 ELSE 3 ELSE 4 END",
+            "SELECT CASE WHEN 1 THEN 2 ELSE 3 WHEN 1 THEN 2 END",
+            "SELECT CASE 1 WHEN 1 END",
+            "SELECT CASE 1 THEN 2 END",
+            "SELECT CASE WHEN 1 THEN 2 WHEN 3 END",
+            "SELECT CASE WHEN 1 THEN 2 THEN 3 END",
+            "SELECT CASE WHEN 1 THEN 2, 3 END",
+            "SELECT CASE 1, 2 WHEN 1 THEN 2 END",
+            "SELECT CASE WHEN 1 THEN 2 END 3",
+            "SELECT CASE",
+            "SELECT CASE WHEN",
+            "SELECT WHEN 1 THEN 2 END",
+            "SELECT CASE WHEN 1 THEN 2 AS a END",
+            "SELECT CASE(1, 2)",
+            "SELECT 1 AS case",
+            "SELECT 1 AS when",
+            // SQLite 3.46.1 gives a value for the rest.
+            // It accepts END as an alias. No keyword is an alias here.
+            "SELECT CASE WHEN 1 THEN 2 END END",
+            "SELECT 1 AS end",
+            // `NOT NULL` as a postfix operator is not supported.
+            "SELECT CASE WHEN 1 THEN 2 END NOT NULL",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT CASE 1 END").unwrap_err().to_string(),
+            "unsupported syntax at Word(\"END\")"
+        );
+        assert_eq!(
+            select("SELECT CASE WHEN 1 THEN 2").unwrap_err().to_string(),
+            "unexpected end of the statement"
+        );
+    }
+
+    #[test]
+    fn error_in_a_part_of_a_case_is_an_error() {
+        for sql in [
+            // SQLite 3.46.1 gives a value for each one up to the `iif` lines.
+            // It does not compute the part with the error, or the overflow is a real number.
+            "SELECT CASE WHEN 1 THEN 2 ELSE 9223372036854775807 + 1 END",
+            "SELECT CASE WHEN 1 THEN 2 ELSE abs(-9223372036854775807 - 1) END",
+            "SELECT CASE WHEN 1 THEN 2 WHEN abs(-9223372036854775807 - 1) THEN 3 END",
+            "SELECT CASE WHEN 0 THEN abs(-9223372036854775807 - 1) ELSE 3 END",
+            "SELECT CASE 1 WHEN 1 THEN 2 WHEN abs(-9223372036854775807 - 1) THEN 3 END",
+            "SELECT CASE WHEN 1 THEN 2 WHEN 1 THEN 4611686018427387904 * 2 END",
+            "SELECT CASE WHEN 0 THEN 1 IS 1 ELSE 3 END",
+            // `iif` is a function of SQLite and is not supported here.
+            "SELECT iif(1, 2, 3)",
+            "SELECT CASE WHEN 1 THEN iif(1, 2, 3) END",
+            "SELECT CASE WHEN 1 THEN 2 ELSE iif(1, 2, 3) END",
+            "SELECT CASE iif(1, 2, 3) WHEN 2 THEN 1 END",
+            // SQLite gives an error for the rest.
+            "SELECT CASE NULL WHEN abs(-9223372036854775807 - 1) THEN 3 ELSE 4 END",
+            "SELECT CASE WHEN 1 THEN 2 ELSE nosuch(1) END",
+            "SELECT CASE WHEN 1 THEN 2 ELSE x END",
+            "SELECT CASE 9223372036854775808 WHEN 1 THEN 2 END",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+    }
+
     #[test]
     fn select_list_keywords_and_aliases() {
         assert_eq!(run("select all 1 AS a, 2 b ,3"), ints(&[1, 2, 3]));
@@ -1355,7 +1661,6 @@ mod tests {
             "SELECT 0x10",
             "SELECT a",
             "SELECT abs(1)",
-            "SELECT CASE WHEN 1 THEN 2 END",
             "SELECT 5 ISNULL",
             "SELECT 5 notnull",
             "SELECT 1 BETWEEN 0 AND 2",
