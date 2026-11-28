@@ -82,3 +82,13 @@ Score: 7981 of 10012 records pass in `random/expr/slt_good_0.test`.
 `tests/slt/FORMAT.wiki` is the format document of sqllogictest, copied without change from the same source as the test file.
 `tests/slt/SHA256SUMS` has the checksum of each test file.
 `ci/guard.sh` runs in CI before the build and checks the test data, the dependencies, and that a pull request does not change the engine and its measure in one change.
+The measure includes `yantra/`.
+
+## The runner
+
+`yantra/` holds the runner of the factory.
+A person puts the label `agent-go` on a ticket.
+The runner starts one coding agent on the ticket, checks the result with its own commands, opens the pull request, waits for the Qodo review, and gives the findings back to the agent 2 times at most.
+Then it stops with the label `ready-for-human` or `needs-human`.
+A person merges.
+`yantra/README.md` has the flow, the labels, the logs, and what the agent can and cannot do.

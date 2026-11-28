@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd user agent of the yantra runner. install.sh fills in __REPO__, __HOME__ and __STATE__. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.yantra.tick</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>python3</string>
+		<string>__REPO__/yantra/runner.py</string>
+		<string>tick</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>600</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:__HOME__/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>YANTRA_STATE</key>
+		<string>__STATE__</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__STATE__/tick.log</string>
+	<key>StandardErrorPath</key>
+	<string>__STATE__/tick.log</string>
+</dict>
+</plist>
