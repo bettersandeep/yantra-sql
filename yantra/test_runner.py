@@ -883,3 +883,10 @@ class BranchNameTest(unittest.TestCase):
     def test_empty_title(self):
         self.assertEqual(runner.branch_name(3, ""), "ticket-3")
         self.assertEqual(runner.branch_name(3, "!!!"), "ticket-3")
+
+    def test_branches_of_a_ticket_are_found_by_number(self):
+        refs = ["origin/main", "origin/HEAD", "origin/ticket-24", "origin/case-expressions-in-select-24", "origin/other-work-124", "origin/cast-to-integer-in-18", ""]
+        self.assertEqual(runner.ticket_branches(refs, 24), ["case-expressions-in-select-24", "ticket-24"])
+        self.assertEqual(runner.ticket_branches(refs, 18), ["cast-to-integer-in-18"])
+        self.assertEqual(runner.ticket_branches(refs, 4), [])
+        self.assertEqual(runner.ticket_branches(refs, 7), [])
