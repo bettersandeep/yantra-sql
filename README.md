@@ -63,3 +63,10 @@ The engine returns an error for each other statement or expression, and for inte
 A SQLite keyword is not accepted as an alias.
 An expression that is nested more than 100 levels deep is an error.
 Score: 4577 of 10012 records pass in `random/expr/slt_good_0.test`.
+
+## Rules and checks
+
+`AGENTS.md` has the rules for the agents, and each rule says which check enforces it.
+`tests/slt/FORMAT.wiki` is the format document of sqllogictest, copied without change from the same source as the test file.
+`tests/slt/SHA256SUMS` has the checksum of each test file.
+`ci/guard.sh` runs in CI before the build and checks the test data, the dependencies, and that a pull request does not change the engine and its measure in one change.
