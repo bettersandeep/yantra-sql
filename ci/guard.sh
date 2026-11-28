@@ -32,7 +32,7 @@ fi
 #    from the measure side into src/ is seen on both sides.
 #    yantra/ is on the measure side: the runner and the brief of the agents
 #    check the engine, so the engine does not change with them.
-if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request_target ]; then
 	changed=$(git -c core.quotePath=false diff --no-renames --name-only "origin/${GITHUB_BASE_REF}...HEAD")
 	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$)' || true)
 	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/)' | grep -v '^tests/slt/baseline\.txt$' || true)
