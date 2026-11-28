@@ -87,7 +87,8 @@ It does not trust the report.
 
 - When you stop, Qodo reviews your changes before the runner commits them.
   If that review has findings, you get one more start with their file, before the commit.
-  It is the only round for those findings.
+  The runner commits only when no such finding is open.
+- A ticket has at most 2 fix rounds for failed checks and review findings together.
 - A later start can give you the path of a file with the output of a failed check, or with review findings.
 - The file with review findings has each open finding of Qodo that the runner must see fixed.
   For each one it gives the title, the description, the category, the action level, the location and the evidence.

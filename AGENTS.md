@@ -88,13 +88,13 @@ The yantra runner enforces this gate on each ticket, in this order.
 A person merges.
 The runner never merges.
 
-1. Local review: before each commit, Qodo reviews the work that is not committed yet (`qodo review`). The agent gets 1 round in a run for its findings at the threshold. What stays open is listed in the pull request, and steps 6 and 7 decide. If the review cannot run, there is no commit.
+1. Local review: before each commit, Qodo reviews the work that is not committed yet (`qodo review`). A finding at the threshold goes back to the agent and uses a fix round of step 7. The runner commits only when no such finding is open. If the review cannot run, there is no commit.
 2. Scope: each changed path of the commit is inside the `Scope:` line of the ticket.
 3. Guard: `ci/guard.sh` from the base branch passes.
 4. Build, lint and tests: `cargo fmt --check`, `cargo clippy` with warnings as errors, and `cargo test` pass.
 5. Score: the test prints the exact number that is in `tests/slt/baseline.txt`, and the number does not go down.
 6. Review: the Qodo review of the head commit is complete. The runner reads Qodo's review record, not the text of its comment.
-7. Findings: each open `action_required` and `remediation_recommended` finding is fixed. There are at most 2 fix rounds, for failed checks and findings together, and each round is a separate commit by the runner.
+7. Findings: each open `action_required` and `remediation_recommended` finding is fixed. There are at most 2 fix rounds for one ticket: failed checks, findings of the local review and findings of the pull request review use the same 2 rounds. So the agent starts at most 3 times. Each commit is a commit by the runner.
 8. Open `informational` findings and `dismissed` findings are listed for the person. The runner does not fix them.
 
 A finding is open when its status is `pending`, `partial_implementation`, `not_implemented` or `focus_areas_edited`.

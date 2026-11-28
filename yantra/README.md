@@ -62,7 +62,7 @@ It changes nothing.
 6. It runs the local review: `qodo review` on the changes of the agent that are not committed yet.
    If the agent changed no file, the run needs a human, and there is no review.
    The section "The local review" below has the rules.
-   Then it commits the changes of the agent as one commit.
+   When that review has no open finding at the threshold, it commits the changes of the agent as one commit.
    Then it removes each file that git ignores, so the checks see the commit and nothing more.
 7. It runs its own checks.
    Each changed path is inside the scope.
@@ -83,9 +83,8 @@ It changes nothing.
 12. It stops: it comments on the issue, sets the end label, and then removes `agent-working`.
 
 The runner has 2 fix attempts for one ticket.
-A failed check and a pull request review with findings each use one.
-The local review has a budget of its own: 1 agent round in one run.
-So one ticket gets 4 agent starts at most, and the pull request gets 3 commits at most.
+A failed check, a local review with findings and a pull request review with findings each use one.
+So one ticket gets 3 agent starts at most, and the pull request gets 3 commits at most.
 The commit of the first start has the message `Ticket #<N>: <title>`.
 Each later one has `Ticket #<N>: fixes after checks or review, round <k>`.
 
@@ -99,23 +98,34 @@ The pull request review comes late: by then the commit is public.
 So Qodo also reviews the work before the runner commits it.
 The runner runs `qodo review --json` in the clone, not the agent, and the tool limits of the agent do not change.
 
-- The review gets the ticket URL (`--ticket`) and a context file (`--context-file`) whose `recent_work` has the ticket title and the acceptance criteria.
+- The review gets the ticket URL (`--ticket`) and a context file (`--context-file`).
+  Its `notes` has the ticket title and the acceptance criteria.
+  After a fix round, its `recent_work` says what the round was for and which paths changed in it.
+  The runner writes both. No text of the agent is in the file.
+- Qodo runs with the environment of the agent: the GitHub tokens of the runner are not in it.
 - The time limit is 10 minutes.
-  One review took 8 to 41 seconds in the tests.
+  One review took 8 to 51 seconds in the tests.
 - The first review of a run has `--full`, so that no result of an older run of the ticket counts.
 - The findings have the same fields and the same words as the review record of a pull request, and the same rules apply.
   The threshold is an open finding with the level `action_required` or `remediation_recommended`.
-- When the review has findings at the threshold, they go to a file in `input/`, and the agent gets one round to fix them or to say why a finding is wrong.
+- When the review has findings at the threshold, they go to a file in `input/`, and the agent gets a round to fix them.
   Then the review runs again.
-  This budget is 1 round in one run, and it is not part of the 2 fix attempts.
-- After that round the runner commits.
-  A finding that is still open does not stop the run.
-  That is also true when the agent changed nothing in its round.
-  The checks of the runner and the pull request review come after it.
-- The pull request body and the comment on the issue get the line `Local review before the commit: <n> findings, <m> fixed, <k> open`, and the titles of the open ones.
+  That round is one of the 2 fix attempts of the ticket.
+- The runner commits only when the local review has no open finding at the threshold.
+  If one is still open and no fix attempt is left, the run needs a human, and the work of the last round is not committed.
+  It stays in the clone of the run directory.
+- If the agent changes no file in its round, for example because it judges each finding wrong, the run needs a human at once.
+  If the agent removes each change, the run needs a human too, and Qodo is not asked.
+- The pull request body and the comment on the issue get the line `Local review before the commit: <n> findings, <m> fixed, <k> open`.
   `<n>` counts the findings at the threshold in the local reviews of the run.
+  Only a finding that Qodo closed as `implemented` counts as fixed.
+  A finding with a different closed status is counted under that word, for example `1 dismissed` or `1 outdated`.
+  The titles of the open ones, of the open `informational` ones and of the `dismissed` ones are listed too.
 - The run needs a human, and there is no commit, when the review cannot run: an error of `qodo`, the time limit, a result that is not complete, or a result that the runner cannot read.
+  That includes a finding with no text `id`, an id in `finding_state.still_open` or `finding_state.introduced` that has no open finding in `findings`, and a finding of an earlier review that a later result does not list.
   It also needs a human when the clone has the file `.qodo/session-context.json`, because Qodo reads that file as context and the agent could write it.
+- The pull request body has a hard limit of 60000 characters.
+  The reports of the agent share what the other parts leave.
 
 ## The review record
 

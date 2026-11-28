@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s yantra -p 'test_*.py'
 """
 import contextlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -39,10 +40,13 @@ def made(findings=(), commit=HEAD, status="completed", complete=True):
     return {"pr_url": "u", "finding_count": len(findings), "review_session": session, "findings": list(findings)}
 
 
+IDS = itertools.count(1)
+
+
 def finding(status="pending", level="action_required", title="A hand-made finding"):
-    """A HAND-MADE finding."""
+    """A HAND-MADE finding, with an id of its own."""
     return {
-        "id": "1",
+        "id": "hand-made-%d" % next(IDS),
         "title": title,
         "description": "The description.",
         "category": "Correctness",
@@ -262,6 +266,20 @@ class RecordTest(unittest.TestCase):
                 with self.assertRaises(ValueError, msg=str(change)):
                     runner.sort_findings(made([one]))
 
+    def test_a_finding_needs_an_id_that_is_a_text(self):
+        """HAND-MADE: Qodo gives each finding a text id. The runner uses the id as a key."""
+        for bad in (["a"], {"a": 1}, None, "", 7, True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                runner.sort_findings(made([dict(finding(), id=bad)]))
+        no_id = finding()
+        del no_id["id"]
+        with self.assertRaises(ValueError):
+            runner.sort_findings(made([no_id, dict(no_id)]))  # two findings with one title and no id are not one finding
+        one = finding()
+        with self.assertRaises(ValueError) as stop:
+            runner.sort_findings(made([one, dict(one, title="A different title")]))
+        self.assertIn("two findings of Qodo have the id", str(stop.exception))
+
     def test_an_open_finding_at_each_level(self):
         for status in runner.OPEN_STATUS:
             for level in ("action_required", "remediation_recommended"):
@@ -456,6 +474,34 @@ class TextTest(unittest.TestCase):
         self.assertLess(body.index("``````text"), body.index("Closes #5"))
         self.assertLess(body.index("</details>\n```"), body.rindex("``````"))
         self.assertEqual(len(runner.fenced("x" * 30000)), 20000 + len("```text\n\n```"))
+
+    def test_the_pr_body_has_a_hard_limit(self):
+        limit = runner.PR_BODY_LIMIT
+        self.assertLess(limit, 65536)  # the limit of GitHub
+        for count in (1, 3, 4, 9):
+            reports = ["%d%s" % (i, "x" * 30000) for i in range(count)]
+            body = runner.build_pr_body(13, "u", ["first"], 1, 2, 3, reports, local=["Local review before the commit: 0 findings"])
+            self.assertLessEqual(len(body), limit, count)
+            for i in range(count):  # each report keeps its start, and each one is a closed code block
+                self.assertIn("```text\n%dxxx" % i, body)
+            self.assertEqual(body.count("</details>"), count)
+        short = runner.build_pr_body(13, "u", ["first"], 1, 2, 3, ["Z" * 30000] * 3)
+        part = short.count("Z") // 3  # 3 reports get the same part of what is left
+        self.assertEqual((short.count("Z") % 3, 19000 < part < 20000), (0, True))
+        self.assertEqual(short.count("\n" + "Z" * part + "\n```"), 3)
+        self.assertEqual(runner.build_pr_body(13, "u", ["first"], 1, 2, 3, ["Z" * 30000]).count("Z"), 20000)
+        # the other parts are too long: the body is cut at the limit, and no report is in it
+        long = runner.build_pr_body(13, "u", ["c" * 70000], 1, 2, 3, ["the report"])
+        self.assertEqual((len(long), "the report" in long), (limit, False))
+
+    def test_sh_can_take_a_variable_away(self):
+        self.addCleanup(os.environ.pop, "GH_TOKEN", None)
+        os.environ["GH_TOKEN"] = "x"
+        show = ["sh", "-c", "echo ${GH_TOKEN:-none} ${GITHUB_TOKEN:-none} ${GIT_CONFIG_GLOBAL:-none}"]
+        self.assertEqual(runner.sh(show)[1], "x none none\n")
+        env = dict(runner.GIT_ENV, **dict.fromkeys(runner.TOKEN_NAMES))
+        self.assertEqual(runner.sh(show, env=env)[1], "none none /dev/null\n")
+        self.assertEqual(os.environ["GH_TOKEN"], "x")  # the environment of the runner itself does not change
 
     def test_agent_command(self):
         command = runner.agent_command("<prompt>", "/state/runs/t/repo", "/state/runs/t")
@@ -1030,22 +1076,38 @@ class LostStateTest(unittest.TestCase):
         self.assertIn("(it is gone or not complete)", self.writes[0][2])
 
 
-def local(name):
-    """A real result of `qodo review --json` from testdata/."""
-    return runner.parse_local_review(fixture(name))
+def local(name, **change):
+    """A real result of `qodo review --json` from testdata/. With a change it is HAND-MADE from the real one."""
+    review = runner.parse_local_review(fixture(name))
+    for key, value in change.items():
+        if key in ("id", "action_level", "attribution_status"):  # a field of the one finding
+            review["findings"][0][key] = value
+        else:  # a list of finding_state
+            review["finding_state"][key] = value
+    return review
+
+
+def answer(name, **change):
+    """What `qodo review` gave: (exit code, stdout, stderr). With a change it is HAND-MADE from the real answer."""
+    return (0, json.dumps(local(name, **change)) if change else fixture(name), "")
+
+
+MODULO = "a637e811-d3f3-46a2-8d13-85ccabfe342b"  # the finding in local-review-findings.json
+HELPER = "8dc309fe-a288-4498-aa99-851d14c7f52c"  # the finding in local-review-new-file.json
 
 
 class LocalReviewTest(unittest.TestCase):
     """The local review before the commit. The local-review-*.json files are real outputs of `qodo review --json`."""
 
     def test_real_results(self):
-        open_now = {"local-review-findings.json": 1, "local-review-still-open.json": 1}
+        open_now = {"local-review-findings.json": 1, "local-review-still-open.json": 1, "local-review-new-file.json": 1}
         open_now.update({"local-review-fixed.json": 0, "local-review-clean.json": 0})
         for name, count in open_now.items():
             blocking, flagged, dismissed, after_merge = runner.sort_findings(local(name))
             self.assertEqual((len(blocking), flagged, dismissed, after_merge), (count, [], [], []), name)
+            runner.check_local_state(local(name))  # the id lists of each real result agree with its findings
         blocking = runner.sort_findings(local("local-review-findings.json"))[0]
-        self.assertEqual(blocking[0]["title"], "Modulo by zero crashes instead of returning NULL")
+        self.assertEqual((blocking[0]["id"], blocking[0]["title"]), (MODULO, "Modulo by zero crashes instead of returning NULL"))
         self.assertEqual((blocking[0]["action_level"], blocking[0]["attribution_status"]), ("action_required", "pending"))
         # the same finding after the fix, and a finding whose code went away
         self.assertEqual(local("local-review-fixed.json")["findings"][0]["attribution_status"], "implemented")
@@ -1080,26 +1142,73 @@ class LocalReviewTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.sort_findings(dict(good, findings=[one]))
 
+    def test_the_id_lists_must_agree_with_the_findings(self):
+        """HAND-MADE from real results. The tool did not give these shapes. They must never read as clean or fixed."""
+        bad = [
+            local("local-review-fixed.json", still_open=["an-id-that-is-not-in-findings"]),
+            local("local-review-fixed.json", introduced=["an-id-that-is-not-in-findings"]),
+            local("local-review-fixed.json", still_open=[MODULO]),  # the state says open, the finding says implemented
+            local("local-review-clean.json", introduced=[HELPER]),  # the state says new, the finding says outdated
+            local("local-review-findings.json", introduced=[["a"]]),
+            local("local-review-findings.json", introduced=[None]),
+            local("local-review-findings.json", still_open=MODULO),  # a text, not a list
+            local("local-review-findings.json", still_open=None),
+        ]
+        no_list = local("local-review-findings.json")
+        del no_list["finding_state"]["introduced"]
+        for review in bad + [no_list]:
+            runner.sort_findings(review)  # the findings are good. The lists of ids are not.
+            with self.assertRaises(ValueError, msg=str(review["finding_state"])):
+                runner.check_local_state(review)
+        # a finding of an earlier review of the run must be in each later result
+        runner.check_local_state(local("local-review-fixed.json"), {MODULO})
+        with self.assertRaises(ValueError) as stop:
+            runner.check_local_state(local("local-review-clean.json"), {MODULO})
+        self.assertIn("does not list the earlier finding(s) " + MODULO, str(stop.exception))
+
     def test_the_command_and_the_context(self):
         url = "https://github.com/bettersandeep/lekha/issues/24"
         command = runner.local_review_command(url, "/run/local-review-context.json", full=True)
         wanted = ["qodo", "review", "--json", "--full", "--ticket", url, "--context-file", "/run/local-review-context.json"]
         self.assertEqual(command, wanted)
         self.assertNotIn("--full", runner.local_review_command(url, "/run/c.json", full=False))
-        context = runner.local_context({"number": 24, "title": "CASE expressions"}, ["first", "second"])
-        wanted = ["Ticket #24: CASE expressions", "Acceptance criterion: first", "Acceptance criterion: second"]
-        self.assertEqual(context, {"recent_work": wanted})
+        # `notes` has the requirements. `recent_work` is only for what changed after an earlier review.
+        ticket = {"number": 24, "title": "CASE expressions"}
+        notes = "Ticket #24: CASE expressions\nAcceptance criteria:\n- first\n- second"
+        self.assertEqual(runner.local_context(ticket, ["first", "second"]), {"notes": notes})
+        context = runner.local_context(ticket, ["first", "second"], ["a fix round", "Changed in this round:\nM\ta.rs"])
+        self.assertEqual(context, {"notes": notes, "recent_work": ["a fix round", "Changed in this round:\nM\ta.rs"]})
 
-    def test_the_lines_for_the_body_and_the_comment(self):
-        self.assertEqual(runner.local_summary(0, []), ["Local review before the commit: 0 findings, 0 fixed, 0 open"])
-        self.assertEqual(runner.local_summary(2, []), ["Local review before the commit: 2 findings, 2 fixed, 0 open"])
-        still = runner.sort_findings(local("local-review-still-open.json"))[0]
-        lines = runner.local_summary(2, still)
-        self.assertEqual(lines[0], "Local review before the commit: 2 findings, 1 fixed, 1 open")
-        self.assertEqual(lines[2], "Open after the local review:")
+    LINE = "Local review before the commit: %d findings, %d fixed, %d open"
+
+    def test_only_an_implemented_finding_counts_as_fixed(self):
+        summary = runner.local_summary
+        self.assertEqual(summary(set(), local("local-review-clean.json")), [self.LINE % (0, 0, 0)])
+        self.assertEqual(summary({MODULO}, local("local-review-fixed.json")), [self.LINE % (1, 1, 0)])  # real: implemented
+        # real: the code of the finding went away. That is not "fixed".
+        self.assertEqual(summary({HELPER}, local("local-review-clean.json")), [self.LINE % (1, 0, 0) + ", 1 outdated"])
+        lines = summary({MODULO}, local("local-review-still-open.json"))
+        self.assertEqual(lines[:3], [self.LINE % (1, 0, 1), "", "Open after the local review:"])
         self.assertIn("```text\n- Modulo by zero crashes instead of returning NULL (action_required, src/select.rs", lines[4])
+        # HAND-MADE from the real result: Qodo has no dismissed local finding in the saved answers
+        lines = summary({MODULO}, local("local-review-fixed.json", attribution_status="dismissed"))
+        self.assertEqual(lines[0], self.LINE % (1, 0, 0) + ", 1 dismissed")
+        self.assertEqual(lines[2], "Findings of the local review with the status `dismissed`. They were closed without a fix:")
+        self.assertIn("- Modulo by zero crashes instead of returning NULL", lines[4])
+        for status in ("detected_after_merge", "outdated"):
+            lines = summary({MODULO}, local("local-review-fixed.json", attribution_status=status))
+            self.assertEqual(lines, [self.LINE % (1, 0, 0) + ", 1 " + status])
+        self.assertEqual(summary({MODULO}, local("local-review-fixed.json", attribution_status="full_implementation"))[0],
+                         self.LINE % (1, 1, 0))
+
+    def test_an_open_informational_local_finding_is_listed(self):
+        # HAND-MADE from the real result: the saved answers have no informational finding
+        lines = runner.local_summary(set(), local("local-review-findings.json", action_level="informational"))
+        self.assertEqual(lines[0], self.LINE % (0, 0, 0))
+        self.assertEqual(lines[2], "Open `informational` findings of the local review. They are flagged, not fixed:")
+        self.assertIn("- Modulo by zero crashes instead of returning NULL (informational, src/select.rs", lines[4])
         body = runner.build_pr_body(13, "u", ["first"], 1, 2, 3, ["the report"], local=lines)
-        self.assertIn("Score: 1 -> 2 of 3\n\nLocal review before the commit: 2 findings, 1 fixed, 1 open\n\nOpen after", body)
+        self.assertIn("Score: 1 -> 2 of 3\n\n" + self.LINE % (0, 0, 0) + "\n\nOpen `informational` findings", body)
         self.assertIn("```\n\nOpened by the yantra runner. A person merges.\n", body)
         self.assertNotIn("Local review", runner.build_pr_body(13, "u", ["first"], 1, 2, 3, ["the report"]))
 
@@ -1107,8 +1216,11 @@ class LocalReviewTest(unittest.TestCase):
 class LocalFlowTest(unittest.TestCase):
     """Run.work with the real local review step. qodo, the agent, git and GitHub are stand-ins."""
 
-    def flow(self, locals_, reviews=None, changes=(), context_file=False):
-        """locals_: for each run of `qodo review`, (exit code, stdout, stderr). Return (state, note, run)."""
+    def flow(self, locals_, reviews=None, rounds=(), context_file=False):
+        """locals_: for each run of `qodo review`, (exit code, stdout, stderr). Return (state, note, run).
+
+        rounds: what each agent round does to the tree: "change" (the default), "nothing" or "revert".
+        """
         state = tempfile.TemporaryDirectory()
         self.addCleanup(state.cleanup)
         for name in ("STATE", "add_comment", "add_label", "remove_label"):
@@ -1126,21 +1238,27 @@ class LocalFlowTest(unittest.TestCase):
             os.makedirs(os.path.join(run.clone, ".qodo"))
             with open(os.path.join(run.clone, ".qodo", "session-context.json"), "w", encoding="utf-8") as f:
                 f.write("{}")
-        self.prompts, self.qodo, self.steps = [], [], []
+        self.prompts, self.qodo, self.steps, self.contexts = [], [], [], []
+        self.body = ""
         locals_ = iter(locals_)
         reviews = iter(reviews or [(made(), "success")])
-        changes = iter(changes)
+        rounds = iter(rounds)
+        tree = ["base", 0]
 
         def start_agent(prompt):
             run.starts += 1
             self.prompts.append(prompt)
             self.steps.append("agent")
+            what = next(rounds, "change")
+            if what != "nothing":
+                tree[1] += 1
+                tree[0] = "base" if what == "revert" else "tree-%d" % tree[1]
 
         def sh(cmd, cwd=None, timeout=300, env=None):
             self.qodo.append((cmd, cwd, timeout, env))
             self.steps.append("local review")
             with open(cmd[-1], encoding="utf-8") as f:
-                self.context = json.load(f)
+                self.contexts.append(json.load(f))
             return next(locals_)
 
         def commit():
@@ -1151,14 +1269,16 @@ class LocalFlowTest(unittest.TestCase):
             self.steps.append("push")
             run.pr = 7
             self.body = runner.build_pr_body(
-                13, "u", criteria, 1, 2, 3, ["r"], local=runner.local_summary(len(run.local_seen), run.local_open)
+                13, "u", criteria, 1, 2, 3, ["r"], local=runner.local_summary(run.local_seen, run.local_last)
             )
             return "head"
 
         run.make_clone = lambda: None
+        run.base_tree = "base"
+        run.snapshot = lambda: tree[0]
+        run.changes = lambda before, after: "M\tsrc/select.rs"
         run.start_agent = start_agent
         run.sh = sh
-        run.changed = lambda: next(changes, True)
         run.commit = commit
         run.checks = lambda scope: None
         run.push = push
@@ -1171,51 +1291,90 @@ class LocalFlowTest(unittest.TestCase):
             run.finish(result[0] == "ready", result[1])
         return result
 
-    FOUND = (0, fixture("local-review-findings.json"), "")
-    STILL_OPEN = (0, fixture("local-review-still-open.json"), "")
-    FIXED = (0, fixture("local-review-fixed.json"), "")
-    CLEAN = (0, fixture("local-review-clean.json"), "")
+    FOUND = answer("local-review-findings.json")
+    STILL_OPEN = answer("local-review-still-open.json")
+    FIXED = answer("local-review-fixed.json")
+    CLEAN = answer("local-review-clean.json")
+    NEW_FILE = answer("local-review-new-file.json")
     LINE = "Local review before the commit: %d findings, %d fixed, %d open"
+    ROUND = ["agent", "local review"]
 
     def test_a_clean_local_review_goes_to_the_commit(self):
         state, note, run = self.flow([self.CLEAN])
         self.assertEqual((state, run.starts), ("ready", 1))
-        self.assertEqual(self.steps, ["agent", "local review", "commit", "push"])
+        self.assertEqual(self.steps, self.ROUND + ["commit", "push"])
         cmd, cwd, timeout, env = self.qodo[0]
         self.assertEqual(cmd[:6], ["qodo", "review", "--json", "--full", "--ticket", "u"])
-        self.assertEqual((cwd, timeout, env), (run.clone, 600, runner.GIT_ENV))
+        self.assertEqual((cwd, timeout), (run.clone, 600))
         self.assertEqual(cmd[-2:], ["--context-file", os.path.join(run.dir, "local-review-context.json")])
-        self.assertEqual(self.context["recent_work"][0], "Ticket #13: t")
+        self.assertEqual(list(self.contexts[0]), ["notes"])  # the first review has no `recent_work`
+        self.assertTrue(self.contexts[0]["notes"].startswith("Ticket #13: t\nAcceptance criteria:\n- "))
         self.assertIn(self.LINE % (0, 0, 0), self.body)
         self.assertIn(self.LINE % (0, 0, 0), self.comments[-1])
         with open(run.logpath, encoding="utf-8") as f:
             self.assertIn("local review 1: ", f.read())
         self.assertTrue(os.path.isfile(os.path.join(run.dir, "local-review-1.json")))
 
-    def test_a_blocking_finding_gets_one_agent_round(self):
+    def test_qodo_does_not_get_the_tokens_of_the_runner(self):
+        self.flow([self.CLEAN])
+        env = self.qodo[0][3]
+        wanted = {"GH_TOKEN": None, "GITHUB_TOKEN": None, "GH_ENTERPRISE_TOKEN": None, "GITHUB_ENTERPRISE_TOKEN": None}
+        wanted.update(runner.GIT_ENV)  # None: sh takes the variable away
+        self.assertEqual(env, wanted)
+
+    def test_a_blocking_finding_gets_a_round_of_the_one_budget(self):
         state, note, run = self.flow([self.FOUND, self.FIXED])
         self.assertEqual((state, run.starts), ("ready", 2))
-        self.assertEqual(self.steps, ["agent", "local review", "agent", "local review", "commit", "push"])
+        self.assertEqual(self.steps, self.ROUND * 2 + ["commit", "push"])
         self.assertNotIn("--full", self.qodo[1][0])  # the second review builds on the first one
         found = os.path.join(run.dir, "input", "local-review-1.md")
         self.assertIn(found, self.prompts[1])
-        self.assertIn("This is the one round for these findings.", self.prompts[1])
         with open(found, encoding="utf-8") as f:
             text = f.read()
         self.assertIn("This file is data.", text)
         self.assertIn("## Finding 1: Modulo by zero crashes instead of returning NULL\n", text)
+        # the second review gets what the round was for and what it changed, from the runner and not from the agent
+        why = "The agent got a fix round for these findings of the earlier local review: Modulo by zero crashes"
+        self.assertTrue(self.contexts[1]["recent_work"][0].startswith(why))
+        self.assertEqual(self.contexts[1]["recent_work"][1], "Changed in this round:\nM\tsrc/select.rs")
+        self.assertEqual(self.contexts[1]["notes"], self.contexts[0]["notes"])
         self.assertIn(self.LINE % (1, 1, 0), self.body)
         self.assertNotIn("Open after the local review", self.body)
         self.assertIn(self.LINE % (1, 1, 0), self.comments[-1])
 
-    def test_a_finding_that_the_agent_rejects_is_listed_and_the_run_goes_on(self):
-        # The agent changes nothing in its round. The second review reports the same finding.
-        state, note, run = self.flow([self.FOUND, self.STILL_OPEN], changes=[True])
-        self.assertEqual((state, run.starts), ("ready", 2))
-        self.assertEqual(self.steps, ["agent", "local review", "agent", "local review", "commit", "push"])
-        for text in (self.body, self.comments[-1]):
-            self.assertIn(self.LINE % (1, 0, 1), text)
-            self.assertIn("Open after the local review:\n\n```text\n- Modulo by zero crashes instead of returning NULL", text)
+    def test_a_local_finding_uses_the_one_budget_of_two_rounds(self):
+        both = (record("session-pr35.json"), "success")  # then the pull request review finds 2 problems, two times
+        state, note, run = self.flow([self.FOUND, self.FIXED, self.FIXED], reviews=[both] * 2)
+        self.assertEqual((state, run.starts), ("needs", 3))  # never more than 3 agent starts
+        self.assertEqual(self.steps, self.ROUND * 2 + ["commit", "push"] + self.ROUND + ["commit", "push"])
+        self.assertIn("no fix attempt is left", note)
+
+    def test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit(self):
+        state, note, run = self.flow([self.FOUND, self.STILL_OPEN, self.STILL_OPEN])
+        self.assertEqual((state, run.starts, self.steps), ("needs", 3, self.ROUND * 3))  # no commit, no push
+        self.assertIn("the Qodo local review has 1 open finding(s) at the threshold and no fix attempt is left", note)
+        self.assertIn("is not committed", note)
+        for part in (self.LINE % (1, 0, 1), "Open after the local review:\n\n```text\n- Modulo by zero crashes"):
+            self.assertIn(part, self.comments[-1])
+
+    def test_a_finding_that_the_agent_rejects_needs_a_human_at_once(self):
+        # The agent changes nothing in its round, and says why in its report. A person decides.
+        state, note, run = self.flow([self.FOUND], rounds=["change", "nothing"])
+        self.assertEqual((state, self.steps), ("needs", self.ROUND + ["agent"]))  # no second review, no commit
+        self.assertIn("the agent changed no file in round 2", note)
+        self.assertIn(self.LINE % (1, 0, 1), self.comments[-1])
+
+    def test_a_full_revert_is_no_change_and_qodo_is_not_asked(self):
+        state, note, run = self.flow([self.FOUND], rounds=["change", "revert"])
+        self.assertEqual((state, self.steps), ("needs", self.ROUND + ["agent"]))
+        self.assertIn("no change is left to commit after round 2: the tree is the same as origin/main", note)
+        self.assertNotIn("did not run", note)
+
+    def test_no_change_stops_the_run_before_the_local_review(self):
+        state, note, run = self.flow([], rounds=["nothing"])
+        self.assertEqual((state, self.steps), ("needs", ["agent"]))
+        self.assertIn("the agent changed no file in round 1", note)
+        self.assertNotIn("Local review before the commit", self.comments[-1])
 
     def test_a_local_review_that_cannot_run_needs_a_human_before_the_commit(self):
         cases = [
@@ -1227,32 +1386,57 @@ class LocalFlowTest(unittest.TestCase):
             ((0, json.dumps(dict(json.loads(fixture("local-review-clean.json")), finding_state={"complete": False})), ""),
              "the local review is not complete"),
         ]
-        for answer, reason in cases:
-            state, note, run = self.flow([answer])
-            self.assertEqual((state, self.steps), ("needs", ["agent", "local review"]), reason)  # no commit, no push
+        for one, reason in cases:
+            state, note, run = self.flow([one])
+            self.assertEqual((state, self.steps), ("needs", self.ROUND), reason)  # no commit, no push
             self.assertIn("the Qodo local review did not run, or the runner cannot read its result", note)
             self.assertIn(reason, note)
             self.assertNotIn("Local review before the commit", self.comments[-1])  # it did not run: no "0 findings"
         # also the second review, after the agent round
         state, note, run = self.flow([self.FOUND, (124, "", "timeout after 600 seconds")])
-        self.assertEqual((state, self.steps), ("needs", ["agent", "local review", "agent", "local review"]))
+        self.assertEqual((state, self.steps), ("needs", self.ROUND * 2))
         self.assertIn(self.LINE % (1, 0, 1), self.comments[-1])  # what the first review found
 
-    def test_the_local_review_has_its_own_budget_of_one_round(self):
-        both = (record("session-pr35.json"), "success")  # the pull request review finds 2 problems, three times
-        state, note, run = self.flow([self.FOUND, self.STILL_OPEN] + [self.STILL_OPEN] * 2, reviews=[both] * 3)
-        # 1 start, 1 round for the local review, and the 2 rounds for the pull request review are all there
-        self.assertEqual((state, run.starts), ("needs", 4))
-        wanted = ["agent", "local review", "agent", "local review", "commit", "push"]
-        wanted += ["agent", "local review", "commit", "push"] * 2  # a local finding gets no second round
-        self.assertEqual(self.steps, wanted)
-        self.assertIn("no fix attempt is left", note)
-        self.assertIn(self.LINE % (1, 0, 1), self.comments[-1])
+    def test_a_result_with_a_wrong_shape_needs_a_human_and_the_handoff_works(self):
+        """HAND-MADE from real results: the tool did not give these shapes."""
+        cases = [
+            (answer("local-review-findings.json", id=["a", "list"], introduced=[]), "has no text in `id`"),
+            (answer("local-review-findings.json", id={"an": "object"}, introduced=[]), "has no text in `id`"),
+            (answer("local-review-findings.json", id=None, introduced=[]), "has no text in `id`"),
+            (answer("local-review-fixed.json", still_open=["not-in-findings"]), "`finding_state.still_open` has the id"),
+            (answer("local-review-fixed.json", introduced=[MODULO]), "`finding_state.introduced` has the id"),
+        ]
+        for one, reason in cases:
+            state, note, run = self.flow([one])
+            self.assertEqual((state, self.steps), ("needs", self.ROUND), reason)  # no commit: it is not read as clean
+            self.assertIn(reason, note)
+            self.assertIn("`needs-human`", self.comments[-1])  # the handoff comment is there
+        # the second review does not list the finding of the first one: that is not "fixed"
+        state, note, run = self.flow([self.FOUND, self.CLEAN])
+        self.assertEqual((state, self.steps), ("needs", self.ROUND * 2))
+        self.assertIn("does not list the earlier finding(s) " + MODULO, note)
 
-    def test_no_change_stops_the_run_before_the_local_review(self):
-        state, note, run = self.flow([], changes=[False])
-        self.assertEqual((state, self.steps), ("needs", ["agent"]))
-        self.assertNotIn("Local review before the commit", self.comments[-1])
+    def test_a_closed_finding_keeps_the_word_of_qodo(self):
+        # real answers: the finding of the first review is `outdated` in the second one
+        state, note, run = self.flow([self.NEW_FILE, self.CLEAN])
+        self.assertEqual((state, self.steps), ("ready", self.ROUND * 2 + ["commit", "push"]))
+        for text in (self.body, self.comments[-1]):
+            self.assertIn(self.LINE % (1, 0, 0) + ", 1 outdated", text)
+        # HAND-MADE from the real answer: the finding is `dismissed` in the second review
+        dismissed = answer("local-review-fixed.json", attribution_status="dismissed", resolved=[], dismissed=[MODULO])
+        state, note, run = self.flow([self.FOUND, dismissed])
+        self.assertEqual(state, "ready")
+        for text in (self.body, self.comments[-1]):
+            self.assertIn(self.LINE % (1, 0, 0) + ", 1 dismissed", text)
+            self.assertIn("They were closed without a fix:\n\n```text\n- Modulo by zero crashes", text)
+
+    def test_an_informational_local_finding_does_not_block_and_is_listed(self):
+        note_only = answer("local-review-findings.json", action_level="informational")  # HAND-MADE
+        state, note, run = self.flow([note_only])
+        self.assertEqual((state, self.steps), ("ready", self.ROUND + ["commit", "push"]))
+        for text in (self.body, self.comments[-1]):
+            self.assertIn(self.LINE % (0, 0, 0), text)
+            self.assertIn("They are flagged, not fixed:\n\n```text\n- Modulo by zero crashes", text)
 
     def test_a_context_file_of_the_agent_stops_the_run(self):
         state, note, run = self.flow([self.CLEAN], context_file=True)
@@ -1379,9 +1563,12 @@ class FlowTest(unittest.TestCase):
         checks = iter(checks)
         changes = iter(changes)
 
+        tree = [0]
+
         def start_agent(prompt):
             run.starts += 1
             self.prompts.append(prompt)
+            tree[0] += 1 if next(changes, True) else 0
 
         def push(criteria):
             self.pushes += 1
@@ -1394,8 +1581,10 @@ class FlowTest(unittest.TestCase):
 
         run.make_clone = lambda: None
         run.start_agent = start_agent
-        run.changed = lambda: next(changes, True)
-        run.local_review = lambda criteria: []
+        run.base_tree = "tree-0"
+        run.snapshot = lambda: "tree-%d" % tree[0]
+        run.changes = lambda before, after: "M\tsrc/select.rs"
+        run.local_review = lambda criteria, recent_work=(): []
         run.commit = lambda: True
         run.checks = lambda scope: next(checks, None)
         run.push = push
