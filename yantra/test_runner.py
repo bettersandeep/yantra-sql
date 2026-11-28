@@ -1161,11 +1161,13 @@ class LocalReviewTest(unittest.TestCase):
             runner.sort_findings(review)  # the findings are good. The lists of ids are not.
             with self.assertRaises(ValueError, msg=str(review["finding_state"])):
                 runner.check_local_state(review)
-        # a finding of an earlier review of the run must be in each later result
-        runner.check_local_state(local("local-review-fixed.json"), {MODULO})
+        # a finding that the review before had as open must be in the next result
+        runner.check_local_state(local("local-review-fixed.json"), {MODULO: "pending"})
         with self.assertRaises(ValueError) as stop:
-            runner.check_local_state(local("local-review-clean.json"), {MODULO})
-        self.assertIn("does not list the earlier finding(s) " + MODULO, str(stop.exception))
+            runner.check_local_state(local("local-review-clean.json"), {MODULO: "pending"})
+        self.assertIn("does not list the finding(s) " + MODULO, str(stop.exception))
+        # a finding that an earlier review closed can be absent later
+        runner.check_local_state(local("local-review-clean.json"), {MODULO: "implemented"})
 
     def test_the_command_and_the_context(self):
         url = "https://github.com/bettersandeep/lekha/issues/24"
@@ -1184,27 +1186,27 @@ class LocalReviewTest(unittest.TestCase):
 
     def test_only_an_implemented_finding_counts_as_fixed(self):
         summary = runner.local_summary
-        self.assertEqual(summary(set(), local("local-review-clean.json")), [self.LINE % (0, 0, 0)])
-        self.assertEqual(summary({MODULO}, local("local-review-fixed.json")), [self.LINE % (1, 1, 0)])  # real: implemented
+        self.assertEqual(summary({}, local("local-review-clean.json")), [self.LINE % (0, 0, 0)])
+        self.assertEqual(summary({MODULO: "implemented"}, local("local-review-fixed.json")), [self.LINE % (1, 1, 0)])  # real: implemented
         # real: the code of the finding went away. That is not "fixed".
-        self.assertEqual(summary({HELPER}, local("local-review-clean.json")), [self.LINE % (1, 0, 0) + ", 1 outdated"])
-        lines = summary({MODULO}, local("local-review-still-open.json"))
+        self.assertEqual(summary({HELPER: "outdated"}, local("local-review-clean.json")), [self.LINE % (1, 0, 0) + ", 1 outdated"])
+        lines = summary({MODULO: "pending"}, local("local-review-still-open.json"))
         self.assertEqual(lines[:3], [self.LINE % (1, 0, 1), "", "Open after the local review:"])
         self.assertIn("```text\n- Modulo by zero crashes instead of returning NULL (action_required, src/select.rs", lines[4])
         # HAND-MADE from the real result: Qodo has no dismissed local finding in the saved answers
-        lines = summary({MODULO}, local("local-review-fixed.json", attribution_status="dismissed"))
+        lines = summary({MODULO: "dismissed"}, local("local-review-fixed.json", attribution_status="dismissed"))
         self.assertEqual(lines[0], self.LINE % (1, 0, 0) + ", 1 dismissed")
         self.assertEqual(lines[2], "Findings of the local review with the status `dismissed`. They were closed without a fix:")
         self.assertIn("- Modulo by zero crashes instead of returning NULL", lines[4])
         for status in ("detected_after_merge", "outdated"):
-            lines = summary({MODULO}, local("local-review-fixed.json", attribution_status=status))
+            lines = summary({MODULO: status}, local("local-review-fixed.json", attribution_status=status))
             self.assertEqual(lines, [self.LINE % (1, 0, 0) + ", 1 " + status])
-        self.assertEqual(summary({MODULO}, local("local-review-fixed.json", attribution_status="full_implementation"))[0],
+        self.assertEqual(summary({MODULO: "full_implementation"}, local("local-review-fixed.json", attribution_status="full_implementation"))[0],
                          self.LINE % (1, 1, 0))
 
     def test_an_open_informational_local_finding_is_listed(self):
         # HAND-MADE from the real result: the saved answers have no informational finding
-        lines = runner.local_summary(set(), local("local-review-findings.json", action_level="informational"))
+        lines = runner.local_summary({}, local("local-review-findings.json", action_level="informational"))
         self.assertEqual(lines[0], self.LINE % (0, 0, 0))
         self.assertEqual(lines[2], "Open `informational` findings of the local review. They are flagged, not fixed:")
         self.assertIn("- Modulo by zero crashes instead of returning NULL (informational, src/select.rs", lines[4])
@@ -1360,6 +1362,16 @@ class LocalFlowTest(unittest.TestCase):
         for part in (self.LINE % (1, 0, 1), "Open after the local review:\n\n```text\n- Modulo by zero crashes"):
             self.assertIn(part, self.comments[-1])
 
+    def test_a_closed_local_finding_can_be_absent_after_the_commit(self):
+        # The three real answers of the third run of ticket 45: found, fixed, and after the commit a
+        # complete incremental review that does not list the fixed finding. The old rule stopped the run there.
+        found, fixed, later = (answer("local-review-run45-%s.json" % name) for name in ("1-found", "2-fixed", "3-after-commit"))
+        both = (record("session-pr35.json"), "success")  # the pull request review has findings one time
+        state, note, run = self.flow([found, fixed, later], reviews=[both, (made(), "success")])
+        self.assertEqual(state, "ready")
+        self.assertEqual(self.steps, self.ROUND * 2 + ["commit", "push"] + self.ROUND + ["commit", "push"])
+        self.assertIn(self.LINE % (1, 1, 0), self.body)
+
     def test_a_command_that_passes_its_time_limit_leaves_no_process(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "pid")
@@ -1432,7 +1444,7 @@ class LocalFlowTest(unittest.TestCase):
         # the second review does not list the finding of the first one: that is not "fixed"
         state, note, run = self.flow([self.FOUND, self.CLEAN])
         self.assertEqual((state, self.steps), ("needs", self.ROUND * 2))
-        self.assertIn("does not list the earlier finding(s) " + MODULO, note)
+        self.assertIn("does not list the finding(s) " + MODULO, note)
 
     def test_a_closed_finding_keeps_the_word_of_qodo(self):
         # real answers: the finding of the first review is `outdated` in the second one

@@ -126,7 +126,8 @@ After each agent start the runner kills each process that the agent left behind.
   A finding with a different closed status is counted under that word, for example `1 dismissed` or `1 outdated`.
   The titles of the open ones, of the open `informational` ones and of the `dismissed` ones are listed too.
 - The run needs a human, and there is no commit, when the review cannot run: an error of `qodo`, the time limit, a result that is not complete, or a result that the runner cannot read.
-  That includes a finding with no text `id`, an id in `finding_state.still_open` or `finding_state.introduced` that has no open finding in `findings`, and a finding of an earlier review that a later result does not list.
+  That includes a finding with no text `id`, an id in `finding_state.still_open` or `finding_state.introduced` that has no open finding in `findings`, and a finding that the review before had as open and that the next result does not list.
+  A finding that an earlier review closed can be absent from a later result: Qodo leaves it out of an incremental review.
   It also needs a human when the clone has the file `.qodo/session-context.json`, because Qodo reads that file as context and the agent could write it.
 - The pull request body has a hard limit of 60000 characters.
   The reports of the agent share what the other parts leave.
