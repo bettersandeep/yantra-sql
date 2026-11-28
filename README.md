@@ -119,3 +119,8 @@ The runner starts one coding agent on the ticket, checks the result with its own
 Then it stops with the label `ready-for-human` or `needs-human`.
 A person merges.
 `yantra/README.md` has the flow, the labels, the logs, and what the agent can and cannot do.
+
+## The server
+
+`server/` holds `lekha-server`, a small HTTP server that runs one SQL statement per request on the engine.
+`server/README.md` has the routes, the limits and how to run it.

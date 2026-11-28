@@ -1,0 +1,38 @@
+# systemd unit for lekha-server on Raspberry Pi OS (Debian 12).
+# This unit is not tested.
+# Install:
+#   sudo install -m 755 server/target/release/lekha-server /usr/local/bin/lekha-server
+#   sudo install -m 644 server/lekha-server.service /etc/systemd/system/lekha-server.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lekha-server
+
+[Unit]
+Description=lekha-server: the lekha SQL engine behind HTTP
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/lekha-server
+Environment=LEKHA_ADDR=127.0.0.1:8080
+#Environment=LEKHA_ALLOW_ORIGIN=
+Restart=on-failure
+RestartSec=2
+
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

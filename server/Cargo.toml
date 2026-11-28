@@ -1,0 +1,9 @@
+[package]
+name = "lekha-server"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "A small HTTP server for the lekha SQL engine."
+
+[dependencies]
+lekha = { path = ".." }
