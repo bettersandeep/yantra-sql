@@ -192,7 +192,6 @@ The agent gets `yantra/brief.md` from the new clone, which is `origin/main`.
 The state directory is `~/.local/state/yantra`.
 It is not in a cache folder, because a cleanup tool can empty those at any time.
 The variable `YANTRA_STATE` changes it.
-The macOS path has a space, so put it in quotes in a shell.
 Do not put the state in a cache folder.
 A cleanup tool can empty a cache folder while a run waits for the review.
 
