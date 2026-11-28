@@ -1,6 +1,12 @@
 # Qodo review setup for this repo. Key names: https://docs.qodo.ai/configuration/configuration-and-command-reference
 # Qodo takes this file from the default branch, so a pull request cannot change the setup of its own review.
 
+[review_agent]
+# One sentence, for the agent that looks for bugs and for the agent that checks the rules.
+# It is the part of a longer instruction that showed an effect in a test (issue #55).
+issues_user_guidelines = "When a pull request has no linked ticket, report that as a finding."
+compliance_user_guidelines = "When a pull request has no linked ticket, report that as a finding."
+
 [review_agent_ux]
 # Show which sources the review used (ticket, rules, files).
 show_context_used = true
