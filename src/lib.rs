@@ -1,5 +1,7 @@
 //! lekha: a SQL database that gives the same answers as SQLite.
 
+#![forbid(unsafe_code)]
+
 use std::fmt;
 
 mod lexer;
