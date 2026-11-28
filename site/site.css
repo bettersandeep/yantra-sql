@@ -136,6 +136,17 @@ button:hover {
   font-family: inherit;
   font-weight: 600;
 }
+#pi {
+  padding: 6px 20px;
+  border-color: var(--link);
+  background: var(--back);
+  color: var(--link);
+  font-family: inherit;
+  font-weight: 600;
+}
+.source {
+  margin-top: 6px;
+}
 :focus-visible {
   outline: 2px solid var(--link);
   outline-offset: 2px;

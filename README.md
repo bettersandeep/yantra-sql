@@ -141,3 +141,13 @@ A person merges.
 
 `server/` holds `lekha-server`, a small HTTP server that runs one SQL statement per request on the engine.
 `server/README.md` has the routes, the limits and how to run it.
+
+## The live page
+
+`site/` holds the live page.
+The button "Run" runs the statement in the engine in the browser.
+The button "Ask the Pi" sends the statement with `POST` to `https://lekha.bettersandeep.com/query`, where `lekha-server` runs on a Raspberry Pi.
+The result then says that the answer came from the Raspberry Pi, and how many milliseconds the request took.
+When the Pi gives no answer in 5 seconds, a status that is not 200, or text that is not the JSON of `server/README.md`, the page says that the Pi did not answer.
+A link with `?q=<sql>` runs in the browser only.
+The address is the constant `PI_URL` in `site/site.js`.
