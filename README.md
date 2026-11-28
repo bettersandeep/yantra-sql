@@ -67,7 +67,6 @@ The engine computes each argument of a function, so an error in an argument is a
 The engine returns an error for each other statement, expression or function, for a wrong number of arguments and for integer overflow.
 A SQLite keyword is not accepted as an alias.
 An expression that is nested more than 100 levels deep is an error.
-A statement of more than 1000 tokens is an error.
 Score: 5021 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 ## Rules and checks

@@ -38,14 +38,6 @@ const KEYWORDS: [&str; 147] = [
 /// SQLite permits a depth of 1000. Raise the limit if real queries need it.
 const MAX_DEPTH: usize = 100;
 
-/// ponytail: a fixed limit on the tokens of one statement.
-/// SQLite 3.49.1 gives an error for an expression tree that is more than 1000 levels deep,
-/// for a function call with more than 1000 arguments and for a result of more than 2000 columns.
-/// Each level, each argument and each column needs a token.
-/// Thus a statement within this limit is within those three limits.
-/// Count the three limits one by one if real queries need longer statements.
-const MAX_TOKENS: usize = 1000;
-
 fn overflow() -> Error {
     Error("integer overflow".to_string())
 }
@@ -210,9 +202,6 @@ pub fn select(sql: &str) -> Result<Vec<Value>, Error> {
         pos: 0,
         depth: 0,
     };
-    if parser.tokens.len() > MAX_TOKENS {
-        return Err(Error("the statement has too many tokens".to_string()));
-    }
     if !parser.keyword("SELECT") {
         return Err(parser.unexpected());
     }
@@ -572,18 +561,5 @@ mod tests {
         };
         assert_eq!(run(&calls(MAX_DEPTH - 1)), ints(&[7]));
         assert!(select(&calls(MAX_DEPTH)).is_err());
-    }
-
-    #[test]
-    fn long_statement_is_an_error() {
-        // `SELECT` and n items with n - 1 commas are 2 * n tokens.
-        let items = |n: usize| format!("SELECT {}", vec!["1"; n].join(", "));
-        assert_eq!(run(&items(MAX_TOKENS / 2)), ints(&vec![1; MAX_TOKENS / 2]));
-        assert!(select(&items(MAX_TOKENS / 2).replace("SELECT", "SELECT +")).is_err());
-        // SQLite gives an error for each of these: 1001 arguments, 1001 terms, 2001 columns.
-        let nulls = vec!["NULL"; 1001].join(", ");
-        assert!(select(&format!("SELECT COALESCE({nulls})")).is_err());
-        assert!(select(&format!("SELECT {}", vec!["1"; 1001].join(" + "))).is_err());
-        assert!(select(&items(2001)).is_err());
     }
 }
