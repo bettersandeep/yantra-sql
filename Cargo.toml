@@ -4,3 +4,6 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT"
 description = "A small SQL database that gives the same answers as SQLite."
+
+[dependencies]
+rusqlite = "0.32"

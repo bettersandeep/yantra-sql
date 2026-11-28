@@ -631,3 +631,5 @@ fn unprintable_text_renders_as_at() {
     // One `@` for each UTF-8 byte: U+00E9 has two bytes.
     assert_eq!(render_text("caf\u{e9}"), Some("caf@@".to_string()));
 }
+
+// Probe: a change to the harness in the same pull request as an engine change.
