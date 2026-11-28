@@ -997,7 +997,7 @@ class Run:
                 extra = local_text(self.save_input("local-review-%d.md" % self.local_reviews, findings_text(blocking)))
                 why = "The agent got a fix round for these findings of the earlier local review: " + names
                 continue
-            if not self.commit():
+            if not self.commit(after):
                 raise NeedsHuman("no change is left to commit in round %d. Read the reports." % self.starts)
             failed = self.checks(scope)
             if failed:
@@ -1177,8 +1177,12 @@ class Run:
         )
         return blocking
 
-    def commit(self):
+    def commit(self, reviewed):
         """Commit the changes of one agent round. Return False when there is no change.
+
+        `reviewed` is the snapshot that the local review saw. The commit holds that
+        tree and no other: a process that the agent left behind can change a file
+        after the review, and such a change must not get into the commit.
 
         `git add -A` takes each change. The scope check runs right after it and fails
         the run for a path that is outside the Scope of the ticket. After the commit,
@@ -1186,6 +1190,10 @@ class Run:
         commit and nothing more.
         """
         self.must_git("add", "-A")
+        if self.must_git("write-tree").strip() != reviewed:
+            raise NeedsHuman(
+                "the files of the clone changed after the Qodo local review of round %d. Nothing is committed." % self.starts
+            )
         code, out, err = self.git("diff", "--cached", "--quiet")
         if code == 0:
             return False

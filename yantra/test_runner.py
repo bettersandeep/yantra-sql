@@ -1261,7 +1261,7 @@ class LocalFlowTest(unittest.TestCase):
                 self.contexts.append(json.load(f))
             return next(locals_)
 
-        def commit():
+        def commit(reviewed):
             self.steps.append("commit")
             return True
 
@@ -1451,12 +1451,18 @@ class LocalFlowTest(unittest.TestCase):
         run = runner.Run(issue())
         messages = []
         run.git = lambda *args: (1, "", "")  # `git diff --cached --quiet`: there is a change
-        run.must_git = lambda *args: messages.append(args[-1]) if args[0] == "commit" else ""
+        answers = {"commit": lambda args: messages.append(args[-1]), "write-tree": lambda args: "tree\n"}
+        run.must_git = lambda *args: answers.get(args[0], lambda args: "")(args)
         run.starts = 2  # the first commit comes after the round for the local review
-        self.assertTrue(run.commit())
+        self.assertTrue(run.commit("tree"))
         run.starts = 3
-        self.assertTrue(run.commit())
+        self.assertTrue(run.commit("tree"))
         self.assertEqual(messages, ["Ticket #13: t", "Ticket #13: fixes after checks or review, round 2"])
+        # a file changed after the local review: the tree is not the reviewed one, and nothing is committed
+        with self.assertRaises(runner.NeedsHuman) as stop:
+            run.commit("the tree that Qodo saw")
+        self.assertIn("changed after the Qodo local review", str(stop.exception))
+        self.assertEqual(len(messages), 2)
 
 
 class AuditTest(unittest.TestCase):
@@ -1585,7 +1591,7 @@ class FlowTest(unittest.TestCase):
         run.snapshot = lambda: "tree-%d" % tree[0]
         run.changes = lambda before, after: "M\tsrc/select.rs"
         run.local_review = lambda criteria, recent_work=(): []
-        run.commit = lambda: True
+        run.commit = lambda reviewed: True
         run.checks = lambda scope: next(checks, None)
         run.push = push
         run.wait_for_review = wait_for_review
