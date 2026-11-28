@@ -545,7 +545,10 @@ class StartTest(unittest.TestCase):
             os.environ["YT_TEST_MISSING"] = image
             if os.path.exists(self.log):
                 os.remove(self.log)
-            self.assertEqual(runner.preconditions(), ["the Docker image `%s` is not on this machine" % image])
+            self.assertEqual(
+                runner.preconditions(),
+                ["the Docker image `%s` is not on this machine. See \"Images\" in yantra/README.md" % image],
+            )
             printed = io.StringIO()
             with contextlib.redirect_stderr(printed):
                 self.assertEqual(runner.run_ticket(18), 2)
