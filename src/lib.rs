@@ -67,3 +67,5 @@ mod tests {
         assert_eq!(error.to_string(), "unsupported syntax at Word(\"FROM\")");
     }
 }
+
+// Probe: an engine change in the same pull request as a guard change.
