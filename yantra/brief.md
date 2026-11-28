@@ -79,12 +79,16 @@ It does not trust the report.
 ## Commits
 
 - You do not commit, and you do not push.
-- When you stop, the runner commits all your changes of this start as one commit.
+- When you stop, Qodo reviews your changes, and then the runner commits them as one commit.
 - So a fix for a review finding is one separate commit.
   Give it a test that fails without the fix.
 
 ## Check output and review findings
 
+- When you stop, Qodo reviews your changes before the runner commits them.
+  If that review has findings, you get one more start with their file, before the commit.
+  The runner commits only when no such finding is open.
+- A ticket has at most 2 fix rounds for failed checks and review findings together.
 - A later start can give you the path of a file with the output of a failed check, or with review findings.
 - The file with review findings has each open finding of Qodo that the runner must see fixed.
   For each one it gives the title, the description, the category, the action level, the location and the evidence.
