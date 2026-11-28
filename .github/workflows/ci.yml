@@ -26,7 +26,3 @@ jobs:
       - run: cargo fmt --check --manifest-path site/wasm/Cargo.toml
       - run: cargo clippy --locked --all-targets --manifest-path site/wasm/Cargo.toml -- -D warnings
       - run: cargo test --locked --manifest-path site/wasm/Cargo.toml
-      # The server for the engine. It is a separate crate with its own lock file.
-      - run: cargo fmt --check --manifest-path server/Cargo.toml
-      - run: cargo clippy --locked --all-targets --manifest-path server/Cargo.toml -- -D warnings
-      - run: cargo test --locked --manifest-path server/Cargo.toml

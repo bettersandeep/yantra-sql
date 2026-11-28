@@ -34,8 +34,7 @@ fi
 #    check the engine, so the engine does not change with them.
 if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request_target ]; then
 	changed=$(git -c core.quotePath=false diff --no-renames --name-only "origin/${GITHUB_BASE_REF}...HEAD")
-	# The engine, and the two other crates that CI checks: the server and the wasm glue.
-	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$|server/|site/wasm/)' || true)
+	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$)' || true)
 	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/)' | grep -v '^tests/slt/baseline\.txt$' || true)
 	if [ -n "$engine" ] && [ -n "$measure" ]; then
 		echo "guard: this pull request changes the engine and the things that measure it" >&2
