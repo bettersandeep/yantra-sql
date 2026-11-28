@@ -65,7 +65,9 @@ The answer is `{"ok":true,"rows":[["3",null]]}`.
 Each value is a JSON string or `null`.
 An integer is its decimal text.
 When the engine returns an error, the status is still 200 and the body is `{"ok":false,"error":"..."}`.
-The server cannot print a real number yet, and returns an error for it.
+A real number is the text that SQLite gives for `CAST(<real> AS TEXT)`: `1.0`, `3.5`, `0.333333333333333`, `9.22337203685478e+18`.
+`SELECT CAST(7 AS REAL) / 2, AVG(1)` gives `{"ok":true,"rows":[["3.5","1.0"]]}`.
+The function `lekha::real_text` of the engine makes this text.
 
 `OPTIONS /query` is the CORS preflight, and returns 204.
 When `LEKHA_ALLOW_ORIGIN` is set, the response has `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers` and `Access-Control-Max-Age`.

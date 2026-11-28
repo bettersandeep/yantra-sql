@@ -5,7 +5,8 @@
 //! Each function argument is computed, so an error in an argument is an error for the statement.
 //! SQLite 3.49.1 does not compute the arguments of `COALESCE` after the first one that is not NULL:
 //! `SELECT COALESCE(1, abs(-9223372036854775807 - 1))` gives 1 there and an error here.
-//! A `CAST` is not a function call. Its only supported target type is `INTEGER`.
+//! A `CAST` is not a function call. Its supported target types are `INTEGER` and `REAL`.
+//! A value is an integer or a real number. `Num` has the rules for a real number.
 //! Each part of a `CASE` is computed too, by the same decision as for `COALESCE`.
 //! SQLite 3.46.1 does not compute the parts after the first match:
 //! `SELECT CASE WHEN 1 THEN 2 ELSE abs(-9223372036854775807 - 1) END` gives 2 there and an error here.
@@ -106,16 +107,142 @@ const MAX_EXPR_HEIGHT: usize = 1000;
 #[derive(Clone, Copy)]
 struct Node {
     /// `None` is the SQL NULL.
-    value: Option<i64>,
+    value: Option<Num>,
     height: usize,
     /// True when the expression is the integer literal 0 for SQLite's parser.
     /// Only `AND` reads it.
     zero: bool,
 }
 
+/// A value that is not NULL: an integer or a real number.
+///
+/// A real number comes only from `CAST ( ... AS REAL )`, from `AVG` and from arithmetic with a
+/// real operand. There is no real literal, and integer overflow is an error and not a real
+/// number (the decision of ticket #2).
+/// Each real number is finite: `finite` is the one place that makes a real result of
+/// arithmetic, and it gives an error for an infinity and for a NaN.
+/// SQLite 3.46.1 keeps an infinity: the product of 17 times
+/// `CAST ( 9223372036854775807 AS REAL )` has the type `real` there.
+#[derive(Clone, Copy)]
+enum Num {
+    Int(i64),
+    Real(f64),
+}
+
+impl Num {
+    /// A real value is true when it is not zero.
+    /// SQLite 3.46.1 gives `2, 1, 2` for `SELECT CASE WHEN CAST(0 AS REAL) THEN 1 ELSE 2 END,
+    /// CASE WHEN CAST(1 AS REAL) / 2 THEN 1 ELSE 2 END,
+    /// CASE WHEN 0 * - CAST(1 AS REAL) THEN 1 ELSE 2 END`. The last one is the negative zero.
+    fn truth(self) -> bool {
+        match self {
+            Num::Int(i) => i != 0,
+            Num::Real(r) => r != 0.0,
+        }
+    }
+
+    /// The value as a real number: the operand of real arithmetic, and `CAST ( ... AS REAL )`.
+    /// An integer becomes the nearest real number.
+    /// SQLite 3.46.1 gives `9007199254740992` for
+    /// `SELECT CAST(CAST(9007199254740993 AS REAL) AS INTEGER)`.
+    fn real(self) -> f64 {
+        match self {
+            Num::Int(i) => i as f64,
+            Num::Real(r) => r,
+        }
+    }
+
+    /// The value as an integer: `CAST ( ... AS INTEGER )`, and each operand of `%`.
+    /// Section 13 of https://www.sqlite.org/lang_expr.html: "A cast of a REAL value into an
+    /// INTEGER results in the integer between the REAL value and zero that is closest to the
+    /// REAL value", and a real above the greatest integer gives the greatest integer, and a
+    /// real below the least integer gives the least integer.
+    /// The `as` of Rust does the same: it truncates toward zero and stops at the two limits.
+    /// SQLite 3.46.1 gives `3, -3, 9223372036854775807, -9223372036854775808` for
+    /// `SELECT CAST(CAST(7 AS REAL) / 2 AS INTEGER), CAST(- CAST(7 AS REAL) / 2 AS INTEGER),
+    /// CAST(CAST(9223372036854775807 AS REAL) * 4 AS INTEGER),
+    /// CAST(- CAST(9223372036854775807 AS REAL) * 4 AS INTEGER)`.
+    fn integer(self) -> i64 {
+        match self {
+            Num::Int(i) => i,
+            Num::Real(r) => r as i64,
+        }
+    }
+
+    /// The result value of a statement.
+    fn value(self) -> Value {
+        match self {
+            Num::Int(i) => Value::Integer(i),
+            Num::Real(r) => Value::Real(r),
+        }
+    }
+}
+
+/// The real result of arithmetic. A result that is not a finite number is an error.
+fn finite(real: f64) -> Result<Option<Num>, Error> {
+    if real.is_finite() {
+        Ok(Some(Num::Real(real)))
+    } else {
+        Err(Error("the result is not a finite number".to_string()))
+    }
+}
+
+/// Compares two values by their exact numbers. `None` is a real number that has no order.
+///
+/// An integer and a real number are compared without a conversion that loses digits.
+/// SQLite 3.46.1 gives `0, 1, 0, 1, 1` for
+/// `SELECT CAST(9223372036854775807 AS REAL) = 9223372036854775807,
+/// CAST(9223372036854775807 AS REAL) > 9223372036854775807,
+/// CAST(9007199254740993 AS REAL) = 9007199254740993,
+/// CAST(9007199254740993 AS REAL) < 9007199254740993,
+/// CAST(-9223372036854775807 AS REAL) < -9223372036854775807`.
+/// A comparison as two real numbers gives 1 for the first one.
+/// The negative zero is equal to 0: `SELECT 0 * - CAST(1 AS REAL) = 0` gives 1.
+fn order(left: Num, right: Num) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    /// 2 to the power 63. Each integer is below it, and no integer is below its negative.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    let int_real = |i: i64, r: f64| {
+        if r.is_nan() {
+            None
+        } else if r >= LIMIT {
+            Some(Ordering::Less)
+        } else if r < -LIMIT {
+            Some(Ordering::Greater)
+        } else {
+            // The part of `r` before the point fits an integer, so the cast is exact.
+            // When that part is equal to `i`, the part after the point decides.
+            let whole = r.trunc();
+            Some(i.cmp(&(whole as i64)).then(if r > whole {
+                Ordering::Less
+            } else if r < whole {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }))
+        }
+    };
+    match (left, right) {
+        (Num::Int(a), Num::Int(b)) => Some(a.cmp(&b)),
+        (Num::Real(a), Num::Real(b)) => a.partial_cmp(&b),
+        (Num::Int(a), Num::Real(b)) => int_real(a, b),
+        (Num::Real(a), Num::Int(b)) => int_real(b, a).map(Ordering::reverse),
+    }
+}
+
+/// True when two values are the same number. `NULLIF` and a `CASE` with a base use it.
+fn equal(left: Num, right: Num) -> Result<bool, Error> {
+    match order(left, right) {
+        Some(order) => Ok(order.is_eq()),
+        None => Err(Error(
+            "a value that is not a number has no order".to_string(),
+        )),
+    }
+}
+
 impl Node {
     /// An expression of height 1.
-    fn leaf(value: Option<i64>) -> Node {
+    fn leaf(value: Option<Num>) -> Node {
         Node {
             value,
             height: 1,
@@ -125,7 +252,7 @@ impl Node {
 
     /// An expression that is one level above operands, and `below` is the height of the
     /// highest operand.
-    fn above(value: Option<i64>, below: usize) -> Result<Node, Error> {
+    fn above(value: Option<Num>, below: usize) -> Result<Node, Error> {
         if below >= MAX_EXPR_HEIGHT {
             return Err(Error(format!(
                 "Expression tree is too large (maximum depth {MAX_EXPR_HEIGHT})"
@@ -143,12 +270,56 @@ fn overflow() -> Error {
     Error("integer overflow".to_string())
 }
 
-/// Applies a binary operator with the integer rules of SQLite.
-fn apply(op: Token, left: Option<i64>, right: Option<i64>) -> Result<Option<i64>, Error> {
+/// Applies a binary operator with the rules of SQLite.
+///
+/// Section 2 of https://www.sqlite.org/lang_expr.html: "The % operator casts both of its
+/// operands to type INTEGER and then computes the remainder after dividing the left integer by
+/// the right integer. The other arithmetic operators perform integer arithmetic if both operands
+/// are integers and no overflow would result, or floating point arithmetic, per IEEE Standard
+/// 754, if either operand is a real value".
+///
+/// The rest is measured on SQLite 3.46.1.
+/// - A real number divided by zero is NULL, for each kind of zero:
+///   `SELECT CAST(1 AS REAL) / 0, CAST(1 AS REAL) / CAST(0 AS REAL), 1 / CAST(0 AS REAL),
+///   CAST(0 AS REAL) / 0, - CAST(1 AS REAL) / 0, CAST(1 AS REAL) / (0 * - CAST(1 AS REAL))`
+///   gives NULL six times.
+/// - `%` with a real operand gives a real number: `typeof(CAST(7 AS REAL) % 2)` and
+///   `typeof(7 % CAST(2 AS REAL))` are `real`, and the values are `1.0`.
+/// - `%` gives NULL when the right operand is 0 after the cast to INTEGER:
+///   `SELECT CAST(7 AS REAL) % 0, 7 % CAST(0 AS REAL), 7 % (CAST(1 AS REAL) / 2),
+///   7 % (- CAST(1 AS REAL) / 2)` gives NULL four times.
+/// - The cast of `%` stops at the limits of an integer:
+///   `(CAST(9223372036854775807 AS REAL) * 4) % 10` is `7.0`, the same with a minus sign before
+///   the CAST is `-8.0`, and `CAST(-9223372036854775807 - 1 AS REAL) % - 1` is `0.0`.
+fn apply(op: Token, left: Option<Num>, right: Option<Num>) -> Result<Option<Num>, Error> {
     // Arithmetic with NULL gives NULL.
-    let (Some(a), Some(b)) = (left, right) else {
+    let (Some(left), Some(right)) = (left, right) else {
         return Ok(None);
     };
+    if let (Num::Int(a), Num::Int(b)) = (left, right) {
+        return Ok(apply_integers(op, a, b)?.map(Num::Int));
+    }
+    if op == Token::Percent {
+        let (a, b) = (left.integer(), right.integer());
+        if b == 0 {
+            return Ok(None);
+        }
+        // An integer remainder is finite. `i64::MIN % -1` is 0.
+        return Ok(Some(Num::Real(a.wrapping_rem(b) as f64)));
+    }
+    let (a, b) = (left.real(), right.real());
+    finite(match op {
+        Token::Plus => a + b,
+        Token::Minus => a - b,
+        Token::Star => a * b,
+        Token::Slash if b == 0.0 => return Ok(None),
+        Token::Slash => a / b,
+        _ => return Err(Error(format!("{op:?} is not a binary operator"))),
+    })
+}
+
+/// Applies a binary operator to two integers, with the integer rules of SQLite.
+fn apply_integers(op: Token, a: i64, b: i64) -> Result<Option<i64>, Error> {
     let result = match op {
         Token::Plus => a.checked_add(b),
         Token::Minus => a.checked_sub(b),
@@ -164,26 +335,33 @@ fn apply(op: Token, left: Option<i64>, right: Option<i64>) -> Result<Option<i64>
     result.map(Some).ok_or_else(overflow)
 }
 
-/// Applies a comparison operator to two integers. The result is 1, 0 or NULL.
+/// Applies a comparison operator to two values. The result is the integer 1 or 0, or NULL.
 /// "The result of any binary operator is either a numeric value or NULL" and a comparison
 /// with a NULL operand gives NULL: https://www.sqlite.org/datatype3.html section 4.
 /// SQLite 3.46.1 gives `1, 0, 1, 0, 1, 1, 0, 0` for
 /// `SELECT 1 = 1, 1 == 2, 1 <> 2, 1 != 1, 1 < 2, 2 <= 2, 1 > 2, 2 >= 3`,
 /// and NULL for each of them when one operand is NULL.
-fn compare(op: Token, left: Option<i64>, right: Option<i64>) -> Result<Option<i64>, Error> {
+/// With a real operand the result is an integer too: `typeof(CAST(1 AS REAL) = 1)` is
+/// `integer`. `order` has the rules for an integer and a real number.
+fn compare(op: Token, left: Option<Num>, right: Option<Num>) -> Result<Option<Num>, Error> {
     let (Some(a), Some(b)) = (left, right) else {
         return Ok(None);
     };
+    let Some(order) = order(a, b) else {
+        return Err(Error(
+            "a value that is not a number has no order".to_string(),
+        ));
+    };
     let result = match op {
-        Token::Equal => a == b,
-        Token::NotEqual => a != b,
-        Token::Less => a < b,
-        Token::LessEqual => a <= b,
-        Token::Greater => a > b,
-        Token::GreaterEqual => a >= b,
+        Token::Equal => order.is_eq(),
+        Token::NotEqual => order.is_ne(),
+        Token::Less => order.is_lt(),
+        Token::LessEqual => order.is_le(),
+        Token::Greater => order.is_gt(),
+        Token::GreaterEqual => order.is_ge(),
         _ => return Err(Error(format!("{op:?} is not a comparison operator"))),
     };
-    Ok(Some(i64::from(result)))
+    Ok(Some(Num::Int(i64::from(result))))
 }
 
 struct Parser<'a> {
@@ -238,10 +416,9 @@ impl<'a> Parser<'a> {
         let mut left = self.and()?;
         while self.keyword("OR") {
             let right = self.and()?;
-            let value = match (left.value, right.value) {
-                (Some(a), _) if a != 0 => Some(1),
-                (_, Some(b)) if b != 0 => Some(1),
-                (Some(_), Some(_)) => Some(0),
+            let value = match (left.value.map(Num::truth), right.value.map(Num::truth)) {
+                (Some(true), _) | (_, Some(true)) => Some(Num::Int(1)),
+                (Some(false), Some(false)) => Some(Num::Int(0)),
                 _ => None,
             };
             left = Node::above(value, left.height.max(right.height))?;
@@ -264,15 +441,15 @@ impl<'a> Parser<'a> {
             let right = self.equality()?;
             if left.zero || right.zero {
                 left = Node {
-                    value: Some(0),
+                    value: Some(Num::Int(0)),
                     height: 1,
                     zero: true,
                 };
                 continue;
             }
-            let value = match (left.value, right.value) {
-                (Some(0), _) | (_, Some(0)) => Some(0),
-                (Some(_), Some(_)) => Some(1),
+            let value = match (left.value.map(Num::truth), right.value.map(Num::truth)) {
+                (Some(false), _) | (_, Some(false)) => Some(Num::Int(0)),
+                (Some(true), Some(true)) => Some(Num::Int(1)),
                 _ => None,
             };
             left = Node::above(value, left.height.max(right.height))?;
@@ -323,7 +500,10 @@ impl<'a> Parser<'a> {
                         "IS with a right side that is not NULL is not supported".to_string(),
                     ));
                 }
-                left = Node::above(Some(i64::from(left.value.is_none() != not)), left.height)?;
+                left = Node::above(
+                    Some(Num::Int(i64::from(left.value.is_none() != not))),
+                    left.height,
+                )?;
             } else {
                 return Ok(left);
             }
@@ -380,12 +560,30 @@ impl<'a> Parser<'a> {
     /// A function call. The parser is at the name, and the next token is `(`.
     /// `COALESCE ( expr , expr {, expr} )` and `NULLIF ( expr , expr )` are from
     /// https://www.sqlite.org/lang_corefunc.html.
-    /// `COUNT ( * )` and `(COUNT | MIN | MAX | SUM) ( [ALL | DISTINCT] expr )` are from
+    /// `COUNT ( * )` and `(COUNT | MIN | MAX | SUM | AVG) ( [ALL | DISTINCT] expr )` are from
     /// https://www.sqlite.org/lang_aggfunc.html.
     /// A SELECT without FROM has one row, so each aggregate sees one value.
+    ///
+    /// `AVG`, from the same document: "The result of avg() is always a floating point value
+    /// whenever there is at least one non-NULL input even if all inputs are integers. The
+    /// result of avg() is NULL if there are no non-NULL inputs."
+    /// SQLite 3.46.1 gives `real, 1.0, NULL, 3.0, -4.0, NULL, 3.5` for
+    /// `SELECT typeof(AVG(1)), CAST(AVG(1) AS TEXT), AVG(NULL), CAST(AVG(ALL 3) AS TEXT),
+    /// CAST(AVG(DISTINCT - 4) AS TEXT), AVG(DISTINCT NULL), CAST(AVG(CAST(7 AS REAL) / 2) AS TEXT)`.
+    /// It gives "misuse of aggregate function AVG()" for `SELECT SUM(AVG(1))` and
+    /// "misuse of aggregate function COUNT()" for `SELECT AVG(COUNT(*))`.
+    ///
+    /// The other aggregates keep the type of a real value, and `COUNT` gives an integer:
+    /// SQLite 3.46.1 gives `integer, real, real, real` for `SELECT typeof(COUNT(CAST(1 AS REAL))),
+    /// typeof(MIN(CAST(1 AS REAL))), typeof(MAX(CAST(1 AS REAL))), typeof(SUM(CAST(1 AS REAL)))`.
+    /// `COALESCE` and `NULLIF` return an argument with its type:
+    /// `typeof(COALESCE(2, CAST(1 AS REAL)))` and `typeof(NULLIF(1, CAST(2 AS REAL)))` are
+    /// `integer`, and `typeof(NULLIF(CAST(1 AS REAL), 2))` is `real`.
+    /// `NULLIF` compares numbers: `SELECT NULLIF(CAST(1 AS REAL), 1), NULLIF(1, CAST(1 AS REAL)),
+    /// NULLIF(0 * - CAST(1 AS REAL), 0)` gives NULL three times.
     fn call(&mut self, name: &str) -> Result<Node, Error> {
         let function = name.to_ascii_uppercase();
-        let aggregate = matches!(function.as_str(), "COUNT" | "MIN" | "MAX" | "SUM");
+        let aggregate = matches!(function.as_str(), "COUNT" | "MIN" | "MAX" | "SUM" | "AVG");
         if !aggregate && function != "COALESCE" && function != "NULLIF" {
             return Err(self.unexpected());
         }
@@ -400,7 +598,7 @@ impl<'a> Parser<'a> {
                 && self.tokens[self.pos..].starts_with(&[Token::Star, Token::RightParen])
             {
                 self.pos += 2;
-                return Ok(Node::leaf(Some(1)));
+                return Ok(Node::leaf(Some(Num::Int(1))));
             }
             // One value has no duplicates, so DISTINCT changes nothing.
             if !self.keyword("ALL") {
@@ -435,18 +633,17 @@ impl<'a> Parser<'a> {
             // NULL if the arguments are the same, else the first argument.
             // If `a` is NULL, the two branches give the same result.
             // If only `b` is NULL, the arguments are different.
-            ("NULLIF", [a, b]) => {
-                if a == b {
-                    None
-                } else {
-                    *a
-                }
-            }
+            ("NULLIF", [a, b]) => match (a, b) {
+                (Some(x), Some(y)) if equal(*x, *y)? => None,
+                _ => *a,
+            },
             // The number of values that are not NULL.
-            ("COUNT", [arg]) => Some(i64::from(arg.is_some())),
+            ("COUNT", [arg]) => Some(Num::Int(i64::from(arg.is_some()))),
             // The minimum, the maximum and the sum of one value are that value.
             // Each one is NULL when there is no value that is not NULL.
             ("MIN" | "MAX" | "SUM", [arg]) => *arg,
+            // The average of one value is that value as a real number.
+            ("AVG", [arg]) => arg.map(|value| Num::Real(value.real())),
             // With two or more arguments, these are scalar functions in SQLite.
             // See `max(X,Y,...)` in https://www.sqlite.org/lang_corefunc.html.
             ("MIN" | "MAX", [_, _, ..]) => {
@@ -463,31 +660,45 @@ impl<'a> Parser<'a> {
         Node::above(value, below)
     }
 
-    /// `CAST ( expr AS INTEGER )`. The parser is at `CAST`, and the next token is `(`.
+    /// `CAST ( expr AS (INTEGER | REAL) )`. The parser is at `CAST`, and the next token is `(`.
     /// The syntax is from https://www.sqlite.org/lang_expr.html#castexpr.
-    /// Each value of this engine is an integer or NULL.
+    /// Section 13 of that document: "If the value of expr is NULL, then the result of the CAST
+    /// expression is also NULL."
     /// SQLite 3.46.1 gives `1, -5, NULL` for
     /// `SELECT CAST(1 AS INTEGER), CAST(- 5 AS INTEGER), CAST(NULL AS INTEGER)`,
-    /// so the cast returns its argument without change.
-    /// SQLite accepts each type name, and also no type name. Only `INTEGER` is supported here.
+    /// so a cast of an integer to INTEGER returns its argument without change.
+    /// It gives `real, 1.0, NULL, 5.0` for `SELECT typeof(CAST(1 AS REAL)),
+    /// CAST(CAST(1 AS REAL) AS TEXT), CAST(NULL AS REAL), CAST(CAST(CAST(5 AS REAL) AS REAL) AS TEXT)`.
+    /// `Num::integer` has the rule for a cast of a real number to INTEGER.
+    /// SQLite accepts each type name, and also no type name. Only `INTEGER` and `REAL` are
+    /// supported here. `FLOAT` and `DOUBLE` give a real number in SQLite and an error here.
     fn cast(&mut self) -> Result<Node, Error> {
         self.pos += 2;
         let operand = self.expr()?;
         if !self.keyword("AS") {
             return Err(self.unexpected());
         }
-        match self.peek() {
-            Some(Token::Word(name)) if name.eq_ignore_ascii_case("INTEGER") => self.pos += 1,
+        let to_real = match self.peek() {
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("INTEGER") => false,
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("REAL") => true,
             Some(Token::Word(name)) => {
                 return Err(Error(format!("CAST to {name} is not supported")));
             }
             _ => return Err(self.unexpected()),
-        }
+        };
+        self.pos += 1;
         if self.peek() != Some(Token::RightParen) {
             return Err(self.unexpected());
         }
         self.pos += 1;
-        Node::above(operand.value, operand.height)
+        let value = operand.value.map(|value| {
+            if to_real {
+                Num::Real(value.real())
+            } else {
+                Num::Int(value.integer())
+            }
+        });
+        Node::above(value, operand.height)
     }
 
     /// `CASE [expr] WHEN expr THEN expr {WHEN expr THEN expr} [ELSE expr] END`.
@@ -508,6 +719,14 @@ impl<'a> Parser<'a> {
     /// ELSE, for a WHEN after the ELSE and for a missing END.
     ///
     /// Each part is computed, so an error in a part that SQLite does not compute is an error here.
+    ///
+    /// With real values, SQLite 3.46.1 gives `5, 5, 7, real, integer` for
+    /// `SELECT CASE CAST(1 AS REAL) WHEN 1 THEN 5 ELSE 6 END,
+    /// CASE 1 WHEN CAST(1 AS REAL) THEN 5 ELSE 6 END,
+    /// CASE CAST(7 AS REAL) / 2 WHEN 3 THEN 5 WHEN CAST(7 AS REAL) / 2 THEN 7 ELSE 6 END,
+    /// typeof(CASE WHEN 1 THEN CAST(1 AS REAL) ELSE 2 END),
+    /// typeof(CASE WHEN 0 THEN CAST(1 AS REAL) ELSE 2 END)`.
+    /// So the base compares as a number, and the result keeps the type of its part.
     fn case(&mut self) -> Result<Node, Error> {
         self.pos += 1;
         // The height of the highest part.
@@ -531,9 +750,10 @@ impl<'a> Parser<'a> {
             }
             let then = self.expr()?;
             below = below.max(when.height).max(then.height);
-            let matched = match base {
-                None => when.value.is_some_and(|v| v != 0),
-                Some(base) => base.is_some() && base == when.value,
+            let matched = match (base, when.value) {
+                (None, when) => when.is_some_and(Num::truth),
+                (Some(Some(base)), Some(when)) => equal(base, when)?,
+                (Some(_), _) => false,
             };
             if matched && found.is_none() {
                 found = Some(then.value);
@@ -554,6 +774,7 @@ impl<'a> Parser<'a> {
 
     /// `+ unary`, `- unary`, `NOT equality`, an integer literal, `NULL`, `( expr )`, a `CASE`, a `CAST` or a function call.
     /// Each recursion of the parser goes through this function.
+    /// There is no real literal: the lexer gives an error for `1.5`.
     fn unary(&mut self) -> Result<Node, Error> {
         if self.depth == MAX_DEPTH {
             return Err(Error("the expression is nested too deep".to_string()));
@@ -568,8 +789,12 @@ impl<'a> Parser<'a> {
             Some(Token::Minus) => {
                 self.pos += 1;
                 let operand = self.unary()?;
+                // A real value stays real: SQLite 3.46.1 gives `real` for
+                // `typeof(- CAST(1 AS REAL))` and `-3.5` for
+                // `CAST(- (CAST(7 AS REAL) / 2) AS TEXT)`.
                 let value = match operand.value {
-                    Some(v) => Some(v.checked_neg().ok_or_else(overflow)?),
+                    Some(Num::Int(v)) => Some(Num::Int(v.checked_neg().ok_or_else(overflow)?)),
+                    Some(Num::Real(v)) => Some(Num::Real(-v)),
                     None => None,
                 };
                 Node::above(value, operand.height)?
@@ -579,7 +804,7 @@ impl<'a> Parser<'a> {
             Some(Token::Integer(v)) => {
                 self.pos += 1;
                 Node {
-                    value: Some(v),
+                    value: Some(Num::Int(v)),
                     height: 1,
                     zero: v == 0,
                 }
@@ -596,7 +821,10 @@ impl<'a> Parser<'a> {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NOT") => {
                 self.pos += 1;
                 let operand = self.equality()?;
-                Node::above(operand.value.map(|v| i64::from(v == 0)), operand.height)?
+                Node::above(
+                    operand.value.map(|v| Num::Int(i64::from(!v.truth()))),
+                    operand.height,
+                )?
             }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("NULL") => {
                 self.pos += 1;
@@ -647,7 +875,7 @@ pub fn select(sql: &str) -> Result<Vec<Value>, Error> {
     }
     let mut row = Vec::new();
     loop {
-        row.push(parser.expr()?.value.map_or(Value::Null, Value::Integer));
+        row.push(parser.expr()?.value.map_or(Value::Null, Num::value));
         // The source of the limit is at `MAX_COLUMNS`.
         if row.len() > MAX_COLUMNS {
             return Err(Error("too many columns in result set".to_string()));
@@ -1060,11 +1288,9 @@ mod tests {
             "SELECT MAX(COUNT(*), 0)",
             "SELECT MAX(MAX(1), 2)",
             "SELECT MAX(MAX(1, 2))",
-            "SELECT AVG(1)",
-            "SELECT avg(NULL)",
             "SELECT TOTAL(1)",
             "SELECT GROUP_CONCAT(1)",
-            "SELECT COUNT(*) + AVG(1)",
+            "SELECT COUNT(*) + TOTAL(1)",
         ] {
             assert!(select(sql).is_err(), "no error: {sql}");
         }
@@ -1073,9 +1299,467 @@ mod tests {
             "the function max with more than one argument is not supported"
         );
         assert_eq!(
-            select("SELECT 1 + AVG (1)").unwrap_err().to_string(),
-            "unsupported syntax at Word(\"AVG\")"
+            select("SELECT 1 + TOTAL (1)").unwrap_err().to_string(),
+            "unsupported syntax at Word(\"TOTAL\")"
         );
+    }
+
+    fn reals(values: &[f64]) -> Vec<Value> {
+        values.iter().map(|v| Value::Real(*v)).collect()
+    }
+
+    /// Runs a statement of one column and returns the SQL type of the value with its text.
+    /// A test compares it with `typeof(x)` and `CAST(x AS TEXT)` of SQLite.
+    fn typed(sql: &str) -> String {
+        match &run(sql)[..] {
+            [Value::Null] => "null".to_string(),
+            [Value::Integer(i)] => format!("integer {i}"),
+            [Value::Real(r)] => format!("real {}", crate::real_text(*r).unwrap()),
+            row => panic!("{sql}: {row:?}"),
+        }
+    }
+
+    // The expected values of the tests from here to `real_values_that_stay_errors` are the
+    // answers of SQLite 3.46.1. For a real value, the type is from `typeof(...)` and the text
+    // is from `CAST(... AS TEXT)` of the same expression.
+    #[test]
+    fn cast_to_real_gives_a_real_value() {
+        for (expr, want) in [
+            ("CAST(1 AS REAL)", "real 1.0"),
+            ("CAST ( - 5 AS REAL )", "real -5.0"),
+            ("cast(0 as real)", "real 0.0"),
+            ("CAST(NULL AS REAL)", "null"),
+            ("CAST(1 / 0 AS REAL)", "null"),
+            ("CAST(CAST(5 AS REAL) AS REAL)", "real 5.0"),
+            ("CAST(2 * 3 + 1 AS REAL)", "real 7.0"),
+            ("CAST(COUNT(*) AS REAL)", "real 1.0"),
+            ("CAST(1 < 2 AS REAL)", "real 1.0"),
+            (
+                "CAST(9223372036854775807 AS REAL)",
+                "real 9.22337203685478e+18",
+            ),
+            (
+                "CAST(-9223372036854775807 - 1 AS REAL)",
+                "real -9.22337203685478e+18",
+            ),
+            // A CAST to INTEGER truncates toward zero and stops at the limits of an integer.
+            ("CAST(CAST(1 AS REAL) AS INTEGER)", "integer 1"),
+            ("CAST(CAST(7 AS REAL) / 2 AS INTEGER)", "integer 3"),
+            ("CAST(- CAST(7 AS REAL) / 2 AS INTEGER)", "integer -3"),
+            ("CAST(CAST(1 AS REAL) / 2 AS INTEGER)", "integer 0"),
+            ("CAST(- CAST(1 AS REAL) / 2 AS INTEGER)", "integer 0"),
+            ("CAST(0 * - CAST(1 AS REAL) AS INTEGER)", "integer 0"),
+            (
+                "CAST(CAST(9223372036854775807 AS REAL) AS INTEGER)",
+                "integer 9223372036854775807",
+            ),
+            (
+                "CAST(CAST(9223372036854775807 AS REAL) * 4 AS INTEGER)",
+                "integer 9223372036854775807",
+            ),
+            (
+                "CAST(- CAST(9223372036854775807 AS REAL) * 4 AS INTEGER)",
+                "integer -9223372036854775808",
+            ),
+            (
+                "CAST(CAST(-9223372036854775807 - 1 AS REAL) AS INTEGER)",
+                "integer -9223372036854775808",
+            ),
+            (
+                "CAST(CAST(9007199254740993 AS REAL) AS INTEGER)",
+                "integer 9007199254740992",
+            ),
+            ("CAST(CAST(NULL AS REAL) AS INTEGER)", "null"),
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), want, "{expr}");
+        }
+        // Three records of `random/expr/slt_good_0.test`. Their SQL is at the lines 368, 525
+        // and 712, and the expected values are those of the file.
+        assert_eq!(
+            run(
+                "SELECT ALL 25 * + COUNT ( * ) + - 0 - + - 6 + + - ( + + CASE + CAST ( + + 38 AS \
+                 REAL ) WHEN 3 THEN NULL WHEN + 42 THEN NULL WHEN - 80 THEN NULL ELSE 14 END ) \
+                 AS col1, - 31 AS col0"
+            ),
+            ints(&[17, -31])
+        );
+        assert_eq!(
+            run("SELECT - MAX ( + - CAST ( NULL AS REAL ) )"),
+            [Value::Null]
+        );
+        assert_eq!(
+            run(
+                "SELECT ALL COALESCE ( + CASE + COUNT ( * ) WHEN - 85 + - AVG ( 23 ) + CASE - \
+                 COUNT ( * ) WHEN + - 67 THEN - 10 + - + 52 WHEN + - 11 THEN - + SUM ( ALL - 46 ) \
+                 / - - 81 WHEN - 39 + COUNT ( * ) THEN NULL ELSE NULL END / + 46 THEN MAX ( \
+                 DISTINCT - 41 ) WHEN 10 THEN 14 ELSE NULL END, - ( 73 ) ) + - COUNT ( * ) AS col1"
+            ),
+            ints(&[-74])
+        );
+    }
+
+    #[test]
+    fn avg_gives_a_real_value() {
+        for (expr, want) in [
+            ("AVG(1)", "real 1.0"),
+            ("avg ( ALL 3 )", "real 3.0"),
+            ("AVG(DISTINCT - 4)", "real -4.0"),
+            ("AVG(NULL)", "null"),
+            ("AVG(ALL NULL)", "null"),
+            ("AVG(DISTINCT NULL)", "null"),
+            ("AVG(1 / 0)", "null"),
+            ("AVG(CAST(2 AS REAL))", "real 2.0"),
+            ("AVG(CAST(7 AS REAL) / 2)", "real 3.5"),
+            ("AVG(0 * - CAST(1 AS REAL))", "real 0.0"),
+            ("- AVG(2) + COUNT(*)", "real -1.0"),
+            ("COALESCE(AVG(NULL), 5)", "integer 5"),
+            ("CAST(AVG(7) AS INTEGER)", "integer 7"),
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), want, "{expr}");
+        }
+        assert_eq!(
+            run("SELECT AVG(1) AS a, AVG(2) b, 3 avg"),
+            [Value::Real(1.0), Value::Real(2.0), Value::Integer(3)]
+        );
+        // The rules for an aggregate inside an aggregate are those of SUM.
+        for (sql, name) in [
+            ("SELECT AVG(AVG(1))", "AVG"),
+            ("SELECT SUM(AVG(1))", "AVG"),
+            ("SELECT AVG(COUNT(*))", "COUNT"),
+            ("SELECT MAX(avg(1))", "avg"),
+            ("SELECT AVG(1 + CAST(MIN(1) AS REAL))", "MIN"),
+            ("SELECT COUNT(CASE WHEN 1 THEN AVG(1) END)", "AVG"),
+        ] {
+            assert_eq!(
+                select(sql).unwrap_err().to_string(),
+                format!("misuse of aggregate function {name}")
+            );
+        }
+        assert_eq!(
+            run("SELECT AVG(1) + AVG(2), SUM(1) + AVG(2)"),
+            reals(&[3.0, 3.0])
+        );
+        for sql in [
+            "SELECT AVG()",
+            "SELECT AVG(*)",
+            "SELECT AVG(1, 2)",
+            "SELECT AVG(DISTINCT)",
+            "SELECT AVG(DISTINCT 1, 2)",
+            "SELECT AVG(ALL DISTINCT 1)",
+            "SELECT AVG(1",
+            "SELECT AVG",
+            "SELECT AVG(9223372036854775807 + 1)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT avg(1, 2)").unwrap_err().to_string(),
+            "wrong number of arguments to function avg"
+        );
+        // The height of an AVG is the height of its argument plus 1, as for each function.
+        let (g, h) = (sum_of(999), sum_of(1000));
+        assert_eq!(run(&format!("SELECT AVG({g})")), reals(&[999.0]));
+        assert_eq!(
+            select(&format!("SELECT AVG({h})")).unwrap_err().to_string(),
+            TOO_HIGH
+        );
+        assert_eq!(
+            select(&format!("SELECT CAST({h} AS REAL)"))
+                .unwrap_err()
+                .to_string(),
+            TOO_HIGH
+        );
+    }
+
+    #[test]
+    fn arithmetic_with_a_real_operand_is_real() {
+        for (expr, want) in [
+            ("CAST(1 AS REAL) + 1", "real 2.0"),
+            ("1 - CAST(3 AS REAL)", "real -2.0"),
+            ("2 * CAST(3 AS REAL)", "real 6.0"),
+            ("CAST(7 AS REAL) / 2", "real 3.5"),
+            ("7 / CAST(2 AS REAL)", "real 3.5"),
+            ("- CAST(7 AS REAL) / 2", "real -3.5"),
+            ("- (CAST(7 AS REAL) / 2)", "real -3.5"),
+            ("+ CAST(1 AS REAL)", "real 1.0"),
+            ("- CAST(0 AS REAL)", "real 0.0"),
+            ("0 * - CAST(1 AS REAL)", "real 0.0"),
+            ("CAST(1 AS REAL) / 3", "real 0.333333333333333"),
+            ("CAST(1 AS REAL) / 10 + CAST(2 AS REAL) / 10", "real 0.3"),
+            ("CAST(1 AS REAL) + NULL", "null"),
+            ("NULL * CAST(1 AS REAL)", "null"),
+            // An integer limit is not a limit for a real operand.
+            (
+                "CAST(9223372036854775807 AS REAL) + 1",
+                "real 9.22337203685478e+18",
+            ),
+            (
+                "9223372036854775807 + CAST(1 AS REAL)",
+                "real 9.22337203685478e+18",
+            ),
+            (
+                "CAST(4611686018427387904 AS REAL) * 2",
+                "real 9.22337203685478e+18",
+            ),
+            (
+                "- CAST(-9223372036854775807 - 1 AS REAL)",
+                "real 9.22337203685478e+18",
+            ),
+            (
+                "CAST(-9223372036854775807 - 1 AS REAL) / - 1",
+                "real 9.22337203685478e+18",
+            ),
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), want, "{expr}");
+        }
+    }
+
+    #[test]
+    fn real_division_by_zero_and_modulo() {
+        // A real number divided by zero is NULL.
+        for expr in [
+            "CAST(1 AS REAL) / 0",
+            "CAST(1 AS REAL) / CAST(0 AS REAL)",
+            "1 / CAST(0 AS REAL)",
+            "CAST(0 AS REAL) / 0",
+            "CAST(0 AS REAL) / CAST(0 AS REAL)",
+            "- CAST(1 AS REAL) / 0",
+            "CAST(1 AS REAL) / (0 * - CAST(1 AS REAL))",
+            // `%` with a right operand that is 0 after the cast to INTEGER is NULL.
+            "CAST(7 AS REAL) % 0",
+            "7 % CAST(0 AS REAL)",
+            "CAST(7 AS REAL) % CAST(0 AS REAL)",
+            "7 % (CAST(1 AS REAL) / 2)",
+            "CAST(7 AS REAL) % (CAST(1 AS REAL) / 2)",
+            "CAST(0 AS REAL) % 0",
+            "7 % (- CAST(1 AS REAL) / 2)",
+            "CAST(7 AS REAL) % NULL",
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), "null", "{expr}");
+        }
+        // `%` casts both operands to INTEGER, and the result is real.
+        for (expr, want) in [
+            ("CAST(7 AS REAL) % 2", "real 1.0"),
+            ("7 % CAST(2 AS REAL)", "real 1.0"),
+            ("CAST(7 AS REAL) % CAST(2 AS REAL)", "real 1.0"),
+            ("- CAST(7 AS REAL) % 2", "real -1.0"),
+            ("CAST(7 AS REAL) % - 2", "real 1.0"),
+            ("(CAST(15 AS REAL) / 2) % 2", "real 1.0"),
+            ("7 % (CAST(5 AS REAL) / 2)", "real 1.0"),
+            ("CAST(7 AS REAL) % - 1", "real 0.0"),
+            ("CAST(-9223372036854775807 - 1 AS REAL) % - 1", "real 0.0"),
+            ("(CAST(9223372036854775807 AS REAL) * 4) % 10", "real 7.0"),
+            ("7 % (CAST(9223372036854775807 AS REAL) * 4)", "real 7.0"),
+            (
+                "(- CAST(9223372036854775807 AS REAL) * 4) % 10",
+                "real -8.0",
+            ),
+            ("CAST(0 AS REAL) % 5", "real 0.0"),
+            ("(0 * - CAST(1 AS REAL)) % 5", "real 0.0"),
+            ("- 1 % CAST(5 AS REAL)", "real -1.0"),
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), want, "{expr}");
+        }
+    }
+
+    #[test]
+    fn comparison_with_a_real_operand() {
+        assert_eq!(
+            run(
+                "SELECT CAST(1 AS REAL) = 1, 1 = CAST(1 AS REAL), CAST(1 AS REAL) <> 1, \
+                 CAST(7 AS REAL) / 2 > 3, CAST(7 AS REAL) / 2 < 4, 3 < CAST(7 AS REAL) / 2, \
+                 4 <= CAST(7 AS REAL) / 2, CAST(7 AS REAL) / 2 >= CAST(7 AS REAL) / 2, \
+                 CAST(1 AS REAL) = NULL, NULL < CAST(1 AS REAL)"
+            ),
+            vals(&[
+                Some(1),
+                Some(1),
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(0),
+                Some(1),
+                None,
+                None,
+            ])
+        );
+        // An integer and a real number compare by their exact numbers.
+        assert_eq!(
+            run(
+                "SELECT CAST(9223372036854775807 AS REAL) = 9223372036854775807, \
+                 CAST(9223372036854775807 AS REAL) > 9223372036854775807, \
+                 9223372036854775807 < CAST(9223372036854775807 AS REAL), \
+                 CAST(9007199254740993 AS REAL) = 9007199254740993, \
+                 CAST(9007199254740993 AS REAL) < 9007199254740993, \
+                 CAST(9007199254740993 AS REAL) = 9007199254740992, \
+                 CAST(-9223372036854775807 - 1 AS REAL) = -9223372036854775807 - 1, \
+                 CAST(-9223372036854775807 AS REAL) < -9223372036854775807, \
+                 - CAST(7 AS REAL) / 2 < - 3, - CAST(7 AS REAL) / 2 > - 4, \
+                 - 3 > - CAST(7 AS REAL) / 2, \
+                 CAST(9223372036854775807 AS REAL) * 4 > 9223372036854775807, \
+                 - CAST(9223372036854775807 AS REAL) * 4 < -9223372036854775807 - 1"
+            ),
+            ints(&[0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+        );
+        // The negative zero is equal to 0.
+        assert_eq!(
+            run(
+                "SELECT 0 * - CAST(1 AS REAL) = 0, 0 * - CAST(1 AS REAL) = CAST(0 AS REAL), \
+                 0 * - CAST(1 AS REAL) < 0"
+            ),
+            ints(&[1, 1, 0])
+        );
+    }
+
+    #[test]
+    fn boolean_operators_and_case_with_real_values() {
+        assert_eq!(
+            run(
+                "SELECT NOT CAST(0 AS REAL), NOT CAST(1 AS REAL) / 2, NOT CAST(1 AS REAL), \
+                 CAST(1 AS REAL) / 2 AND 1, CAST(0 AS REAL) AND 1, CAST(0 AS REAL) AND NULL, \
+                 NULL AND CAST(0 AS REAL), CAST(1 AS REAL) / 2 AND NULL, CAST(0 AS REAL) OR 0, \
+                 CAST(1 AS REAL) / 2 OR 0, CAST(0 AS REAL) OR NULL, NULL OR CAST(1 AS REAL) / 2, \
+                 NOT 0 * - CAST(1 AS REAL), CAST(1 AS REAL) IS NULL, CAST(1 AS REAL) IS NOT NULL, \
+                 CAST(NULL AS REAL) IS NULL"
+            ),
+            vals(&[
+                Some(1),
+                Some(0),
+                Some(0),
+                Some(1),
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(0),
+                Some(1),
+                None,
+                Some(1),
+                Some(1),
+                Some(0),
+                Some(1),
+                Some(1),
+            ])
+        );
+        for (expr, want) in [
+            ("CASE WHEN CAST(0 AS REAL) THEN 1 ELSE 2 END", "integer 2"),
+            (
+                "CASE WHEN CAST(1 AS REAL) / 2 THEN 1 ELSE 2 END",
+                "integer 1",
+            ),
+            (
+                "CASE WHEN 0 * - CAST(1 AS REAL) THEN 1 ELSE 2 END",
+                "integer 2",
+            ),
+            ("CASE CAST(1 AS REAL) WHEN 1 THEN 5 ELSE 6 END", "integer 5"),
+            ("CASE 1 WHEN CAST(1 AS REAL) THEN 5 ELSE 6 END", "integer 5"),
+            (
+                "CASE CAST(7 AS REAL) / 2 WHEN 3 THEN 5 WHEN CAST(7 AS REAL) / 2 THEN 7 ELSE 6 END",
+                "integer 7",
+            ),
+            ("CASE WHEN 1 THEN CAST(1 AS REAL) ELSE 2 END", "real 1.0"),
+            ("CASE WHEN 0 THEN CAST(1 AS REAL) ELSE 2 END", "integer 2"),
+            ("CASE WHEN 1 THEN CAST(7 AS REAL) / 2 END", "real 3.5"),
+            ("NOT CAST(0 AS REAL)", "integer 1"),
+            ("CAST(1 AS REAL) AND 1", "integer 1"),
+            ("CAST(1 AS REAL) = 1", "integer 1"),
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), want, "{expr}");
+        }
+    }
+
+    #[test]
+    fn functions_with_real_values() {
+        for (expr, want) in [
+            ("COALESCE(NULL, CAST(1 AS REAL))", "real 1.0"),
+            ("COALESCE(CAST(1 AS REAL), 2)", "real 1.0"),
+            ("COALESCE(2, CAST(1 AS REAL))", "integer 2"),
+            (
+                "COALESCE(CAST(NULL AS REAL), CAST(7 AS REAL) / 2)",
+                "real 3.5",
+            ),
+            ("NULLIF(CAST(1 AS REAL), 1)", "null"),
+            ("NULLIF(1, CAST(1 AS REAL))", "null"),
+            ("NULLIF(CAST(1 AS REAL), 2)", "real 1.0"),
+            ("NULLIF(1, CAST(2 AS REAL))", "integer 1"),
+            ("NULLIF(CAST(7 AS REAL) / 2, 3)", "real 3.5"),
+            ("NULLIF(CAST(7 AS REAL) / 2, CAST(7 AS REAL) / 2)", "null"),
+            ("NULLIF(CAST(1 AS REAL), NULL)", "real 1.0"),
+            ("NULLIF(0 * - CAST(1 AS REAL), 0)", "null"),
+            ("COUNT(CAST(1 AS REAL))", "integer 1"),
+            ("COUNT(CAST(NULL AS REAL))", "integer 0"),
+            ("COUNT(DISTINCT CAST(0 AS REAL))", "integer 1"),
+            ("MIN(CAST(1 AS REAL))", "real 1.0"),
+            ("MAX(CAST(1 AS REAL))", "real 1.0"),
+            ("SUM(CAST(1 AS REAL))", "real 1.0"),
+            ("MIN(CAST(7 AS REAL) / 2)", "real 3.5"),
+            ("MAX(ALL - CAST(7 AS REAL) / 2)", "real -3.5"),
+            ("SUM(DISTINCT CAST(7 AS REAL) / 2)", "real 3.5"),
+            ("SUM(CAST(NULL AS REAL))", "null"),
+            ("MIN(CAST(NULL AS REAL))", "null"),
+            ("SUM(1)", "integer 1"),
+            ("SUM(0 * - CAST(1 AS REAL))", "real 0.0"),
+            ("MIN(0 * - CAST(1 AS REAL))", "real 0.0"),
+        ] {
+            assert_eq!(typed(&format!("SELECT {expr}")), want, "{expr}");
+        }
+    }
+
+    #[test]
+    fn real_values_that_stay_errors() {
+        let big = "CAST(9223372036854775807 AS REAL)";
+        // SQLite 3.46.1 gives `2.74306203439684e+303` for the product of 16 and `Inf` for the
+        // product of 17. A result that is not a finite number is an error here.
+        let product = |count: usize| vec![big; count].join(" * ");
+        assert_eq!(
+            typed(&format!("SELECT {}", product(16))),
+            "real 2.74306203439684e+303"
+        );
+        for sql in [
+            format!("SELECT {}", product(17)),
+            format!("SELECT - {}", product(17)),
+            format!("SELECT {} + {}", product(16), product(17)),
+            format!("SELECT COALESCE(1, {})", product(17)),
+            format!("SELECT CAST({} AS INTEGER)", product(17)),
+        ] {
+            assert_eq!(
+                select(&sql).unwrap_err().to_string(),
+                "the result is not a finite number"
+            );
+        }
+        // A result that is too small for a real number is zero, and that is finite.
+        assert_eq!(
+            typed(&format!("SELECT 1 / ({}) / {big} / {big}", product(16))),
+            "real 0.0"
+        );
+        for sql in [
+            // Integer overflow stays an error. SQLite gives a real number.
+            "SELECT 9223372036854775807 + 1",
+            "SELECT CAST(9223372036854775807 + 1 AS REAL)",
+            "SELECT AVG(4611686018427387904 * 2)",
+            "SELECT CAST(1 AS REAL) + (9223372036854775807 + 1)",
+            "SELECT - (-9223372036854775807 - 1) + CAST(1 AS REAL)",
+            // A real literal stays an error. SQLite gives a value.
+            "SELECT 1.5",
+            "SELECT .5",
+            "SELECT 1e5",
+            "SELECT 1.",
+            "SELECT CAST(1.5 AS REAL)",
+            "SELECT AVG(1.5)",
+            "SELECT 1.0 + CAST(1 AS REAL)",
+            // SQLite gives a real number for the next four type names.
+            "SELECT CAST(1 AS FLOAT)",
+            "SELECT CAST(1 AS DOUBLE)",
+            "SELECT CAST(1 AS REAL(5))",
+            "SELECT CAST(1 AS REALS)",
+            // SQLite gives an error too.
+            "SELECT 1 AS real(2)",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        // `REAL` is not a keyword of SQLite, so it can be an alias.
+        assert_eq!(run("SELECT 1 real, 2 AS REAL"), ints(&[1, 2]));
     }
 
     // The expected values of the four `cast_` tests are the answers of SQLite 3.46.1.
@@ -1169,7 +1853,6 @@ mod tests {
             "SELECT CAST(1 AS INT)",
             "SELECT CAST(1 AS SIGNED)",
             "SELECT CAST(1 AS BIGINT)",
-            "SELECT CAST(1 AS REAL)",
             "SELECT CAST(1 AS TEXT)",
             "SELECT CAST(1 AS NUMERIC)",
             "SELECT CAST(1 AS BLOB)",

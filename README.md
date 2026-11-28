@@ -54,7 +54,7 @@ The author offers GPL, BSD, MIT or CC0, and this repo uses the file under MIT.
 
 The engine runs `SELECT [ALL | DISTINCT] <item> {, <item>}` without `FROM`.
 An item is an expression with an optional alias.
-An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, the comparisons `= == <> != < <= > >=`, `IS NULL`, `IS NOT NULL`, `NOT`, `AND`, `OR`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM`, `CAST(<expr> AS INTEGER)` and `CASE`.
+An expression can use integer literals, `NULL`, unary `+` and `-`, binary `+ - * / %`, the comparisons `= == <> != < <= > >=`, `IS NULL`, `IS NOT NULL`, `NOT`, `AND`, `OR`, parentheses, `COALESCE`, `NULLIF`, `COUNT`, `MIN`, `MAX`, `SUM`, `AVG`, `CAST(<expr> AS INTEGER)`, `CAST(<expr> AS REAL)` and `CASE`.
 The precedence of the operators is the table in section 2 of https://www.sqlite.org/lang_expr.html, and operators of one row group from left to right.
 A comparison gives 1 or 0, and NULL when an operand is NULL.
 `IS NULL` and `IS NOT NULL` give 1 or 0.
@@ -74,13 +74,30 @@ A `SELECT` without `FROM` has one row, so each aggregate function sees one value
 `COUNT(*)` returns 1.
 `COUNT` with one argument returns 1 when the argument is not NULL, and 0 when it is NULL.
 `MIN`, `MAX` and `SUM` take one argument and return it.
+`AVG` takes one argument and returns it as a real number, or NULL when it is NULL.
 The argument of an aggregate function can start with `ALL` or `DISTINCT`.
 An aggregate function inside the argument of an aggregate function is an error.
 `MIN` and `MAX` with two or more arguments are errors.
 Function names are case-insensitive.
-`CAST(<expr> AS INTEGER)` returns the value of its argument without change, because each value of the engine is an integer or NULL.
-`CAST`, `AS` and `INTEGER` are case-insensitive.
+A value is an integer, a real number or NULL.
+A real number comes from `CAST(<expr> AS REAL)`, from `AVG` and from arithmetic with a real operand.
+A real literal such as `1.5` is an error.
+`+`, `-`, `*` and `/` give a real number when one operand is real, and unary `-` keeps a real number real.
+`%` casts both operands to INTEGER, and with a real operand its result is a real number.
+A real number divided by zero gives NULL, and so does `%` when the right operand is 0 after the cast.
+An integer and a real number compare by their exact numbers: `CAST(9223372036854775807 AS REAL) = 9223372036854775807` is 0.
+A real number is true when it is not zero.
+A real result that is not a finite number is an error. SQLite keeps an infinity.
+Integer overflow is an error too. SQLite changes to a real number there.
+`CAST(<expr> AS INTEGER)` returns an integer without change.
+It truncates a real number toward zero, and a real number outside the range of an integer gives the nearest limit of the range.
+`CAST(<expr> AS REAL)` returns the value as a real number.
+A `CAST` of NULL gives NULL.
+`CAST`, `AS`, `INTEGER` and `REAL` are case-insensitive.
 A `CAST` to each other type is an error, and so is a `CAST` with no type.
+`lekha::real_text` gives the text of a real number as SQLite's `CAST(<real> AS TEXT)` gives it, for example `1.0`, `3.5` and `9.22337203685478e+18`.
+The server and the browser page print a real number with it.
+The rules for real numbers are measured on SQLite 3.46.1, and the comments in `src/select.rs` and `src/lib.rs` have the queries.
 The engine computes each argument of a function, so an error in an argument is an error for the statement.
 `CASE WHEN <cond> THEN <result> {WHEN <cond> THEN <result>} [ELSE <result>] END` gives the result of the first `WHEN` whose condition is true, which means not 0 and not NULL.
 `CASE <base> WHEN <value> THEN <result> {WHEN <value> THEN <result>} [ELSE <result>] END` gives the result of the first `WHEN` whose value equals the base, and a NULL base or a NULL value never matches.
@@ -101,7 +118,7 @@ The expression tree has a height of 1000 at most.
 An integer literal, `NULL` and `COUNT(*)` have height 1, parentheses add nothing, and each operator, `CAST`, `CASE` and function call has the height of its highest part plus 1.
 So a sum of 1000 terms works and a sum of 1001 terms is an error.
 An `AND` with the integer literal 0 as an operand has height 1, because SQLite's parser replaces it with the literal 0.
-Score: 9644 of 10012 records pass in `random/expr/slt_good_0.test`.
+Score: 9986 of 10012 records pass in `random/expr/slt_good_0.test`.
 
 ## Rules and checks
 

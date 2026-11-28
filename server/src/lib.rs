@@ -166,10 +166,14 @@ pub fn result_json(result: thread::Result<Result<Rows, lekha::Error>>) -> String
                     let _ = write!(out, "\"{n}\"");
                 }
                 Value::Text(text) => json_string(&mut out, text),
-                // The engine returns no real value today. Do not guess a format.
-                Value::Real(_) => {
-                    return error_json("this server cannot print a real number yet");
-                }
+                // The text of SQLite for `CAST ( <real> AS TEXT )`, from the engine.
+                // A value that is not a finite number has no such text. Do not guess one.
+                Value::Real(real) => match lekha::real_text(*real) {
+                    Some(text) => json_string(&mut out, &text),
+                    None => {
+                        return error_json("this server cannot print a number that is not finite");
+                    }
+                },
             }
         }
         out.push(']');
@@ -553,7 +557,47 @@ mod tests {
         );
         assert_eq!(
             result_json(Ok(Ok(vec![vec![Value::Integer(1), Value::Real(1.5)]]))),
-            r#"{"ok":false,"error":"this server cannot print a real number yet"}"#
+            r#"{"ok":true,"rows":[["1","1.5"]]}"#
+        );
+    }
+
+    // Each text is the answer of SQLite 3.46.1 for `SELECT CAST(<expr> AS TEXT)`.
+    #[test]
+    fn real_values_have_the_text_of_sqlite() {
+        assert_eq!(
+            query_json(
+                "SELECT CAST(1 AS REAL), CAST(7 AS REAL) / 2, - CAST(7 AS REAL) / 2, AVG(3), \
+                 CAST(1 AS REAL) / 3, CAST(9223372036854775807 AS REAL), \
+                 CAST(1 AS REAL) / 100000, 0 * - CAST(1 AS REAL), CAST(NULL AS REAL), \
+                 CAST(999999999999999 AS REAL), CAST(1000000000000000 AS REAL), \
+                 CAST(1000000000000025 AS REAL), CAST(1 AS REAL) / 10000"
+            ),
+            concat!(
+                r#"{"ok":true,"rows":[["1.0","3.5","-3.5","3.0","0.333333333333333","#,
+                r#""9.22337203685478e+18","1.0e-05","0.0",null,"999999999999999.0","#,
+                r#""1.0e+15","1.00000000000003e+15","0.0001"]]}"#
+            )
+        );
+        // A real divided by zero is NULL in SQLite, and a real literal is not built.
+        assert_eq!(
+            query_json("SELECT CAST(1 AS REAL) / 0"),
+            r#"{"ok":true,"rows":[[null]]}"#
+        );
+        assert_eq!(
+            query_json("SELECT 1.5"),
+            r#"{"ok":false,"error":"unsupported character at byte 8"}"#
+        );
+        // The engine returns no value that is not finite. The server has no text for one.
+        for real in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(
+                result_json(Ok(Ok(vec![vec![Value::Real(real)]]))),
+                r#"{"ok":false,"error":"this server cannot print a number that is not finite"}"#
+            );
+        }
+        let seventeen = ["CAST(9223372036854775807 AS REAL)"; 17].join(" * ");
+        assert_eq!(
+            query_json(&format!("SELECT {seventeen}")),
+            r#"{"ok":false,"error":"the result is not a finite number"}"#
         );
     }
 
