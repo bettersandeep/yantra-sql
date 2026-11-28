@@ -5,6 +5,7 @@
 //! Each function argument is computed, so an error in an argument is an error for the statement.
 //! SQLite 3.49.1 does not compute the arguments of `COALESCE` after the first one that is not NULL:
 //! `SELECT COALESCE(1, abs(-9223372036854775807 - 1))` gives 1 there and an error here.
+//! A `CAST` is not a function call. Its only supported target type is `INTEGER`.
 
 use crate::lexer::{Token, lex};
 use crate::{Error, Value};
@@ -181,7 +182,34 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `+ unary`, `- unary`, an integer literal, `NULL`, `( expr )` or a function call.
+    /// `CAST ( expr AS INTEGER )`. The parser is at `CAST`, and the next token is `(`.
+    /// The syntax is from https://www.sqlite.org/lang_expr.html#castexpr.
+    /// Each value of this engine is an integer or NULL.
+    /// SQLite 3.46.1 gives `1, -5, NULL` for
+    /// `SELECT CAST(1 AS INTEGER), CAST(- 5 AS INTEGER), CAST(NULL AS INTEGER)`,
+    /// so the cast returns its argument without change.
+    /// SQLite accepts each type name, and also no type name. Only `INTEGER` is supported here.
+    fn cast(&mut self) -> Result<Option<i64>, Error> {
+        self.pos += 2;
+        let value = self.expr()?;
+        if !self.keyword("AS") {
+            return Err(self.unexpected());
+        }
+        match self.peek() {
+            Some(Token::Word(name)) if name.eq_ignore_ascii_case("INTEGER") => self.pos += 1,
+            Some(Token::Word(name)) => {
+                return Err(Error(format!("CAST to {name} is not supported")));
+            }
+            _ => return Err(self.unexpected()),
+        }
+        if self.peek() != Some(Token::RightParen) {
+            return Err(self.unexpected());
+        }
+        self.pos += 1;
+        Ok(value)
+    }
+
+    /// `+ unary`, `- unary`, an integer literal, `NULL`, `( expr )`, a `CAST` or a function call.
     /// Each recursion of the parser goes through this function.
     fn unary(&mut self) -> Result<Option<i64>, Error> {
         if self.depth == MAX_DEPTH {
@@ -209,7 +237,11 @@ impl<'a> Parser<'a> {
                 None
             }
             Some(Token::Word(name)) if self.tokens.get(self.pos + 1) == Some(&Token::LeftParen) => {
-                self.call(name)?
+                if name.eq_ignore_ascii_case("CAST") {
+                    self.cast()?
+                } else {
+                    self.call(name)?
+                }
             }
             Some(Token::LeftParen) => {
                 self.pos += 1;
@@ -472,7 +504,6 @@ mod tests {
             "SELECT coalesce2(1, 2)",
             "SELECT nullifx(1, 2)",
             "SELECT null_if(1, 2)",
-            "SELECT CAST(NULL AS INTEGER)",
             "SELECT COALESCE(NULL, ifnull(NULL, 2))",
             "SELECT main.coalesce(1, 2)",
         ] {
@@ -674,6 +705,147 @@ mod tests {
         );
     }
 
+    // The expected values of the four `cast_` tests are the answers of SQLite 3.46.1.
+    #[test]
+    fn cast_to_integer_returns_the_argument() {
+        assert_eq!(
+            run(
+                "SELECT CAST(1 AS INTEGER), CAST(- 5 AS INTEGER), CAST(2 * 3 + 1 AS INTEGER), \
+                 CAST((7) AS INTEGER), CAST(9223372036854775807 AS INTEGER), \
+                 CAST(-9223372036854775807 - 1 AS INTEGER), CAST(0 AS INTEGER)"
+            ),
+            ints(&[1, -5, 7, 7, i64::MAX, i64::MIN, 0])
+        );
+        assert_eq!(
+            run("SELECT CAST(NULL AS INTEGER), CAST(1 / 0 AS INTEGER), 1 + CAST(NULL AS INTEGER)"),
+            [const { Value::Null }; 3]
+        );
+        // Two records of `random/expr/slt_good_0.test`.
+        assert_eq!(
+            run("SELECT 20 / - - 96 + CAST ( 90 AS INTEGER ) AS col2"),
+            ints(&[90])
+        );
+        assert_eq!(
+            run("SELECT - MAX ( ALL + CAST ( NULL AS INTEGER ) )"),
+            [Value::Null]
+        );
+    }
+
+    #[test]
+    fn cast_ignores_case_and_white_space() {
+        assert_eq!(
+            run("SELECT cast(1 as integer), CaSt (2 aS InTeGeR), CAST\t\r\n (\n3 AS INTEGER )"),
+            ints(&[1, 2, 3])
+        );
+        assert_eq!(
+            run("SELECT CAST(1 AS INTEGER) AS x, CAST(2 AS INTEGER) y, CAST(3 AS INTEGER)z"),
+            ints(&[1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn cast_with_each_other_expression() {
+        assert_eq!(
+            run(
+                "SELECT CAST(COUNT(*) AS INTEGER), CAST(MAX(DISTINCT 4) AS INTEGER), \
+                 CAST(COALESCE(NULL, 2) AS INTEGER), CAST(NULLIF(3, 4) AS INTEGER), \
+                 CAST(MIN(1) + SUM(2) AS INTEGER), CAST(COUNT(NULL) AS INTEGER)"
+            ),
+            ints(&[1, 4, 2, 3, 3, 0])
+        );
+        assert_eq!(
+            run(
+                "SELECT COUNT(CAST(NULL AS INTEGER)), SUM(CAST(5 AS INTEGER)), \
+                 COALESCE(CAST(NULL AS INTEGER), 7), - CAST(3 AS INTEGER) * 2, \
+                 (CAST(4 AS INTEGER)), CAST(CAST(6 AS INTEGER) AS INTEGER), \
+                 CAST(- CAST(8 AS INTEGER) AS INTEGER), MIN(ALL CAST(9 AS INTEGER)), \
+                 NULLIF(CAST(1 AS INTEGER), 2), CAST(MAX(1) AS INTEGER) + CAST(MAX(2) AS INTEGER)"
+            ),
+            ints(&[0, 5, 7, -6, 4, 6, -8, 9, 1, 3])
+        );
+        assert_eq!(
+            run(
+                "SELECT CAST(SUM(NULL) AS INTEGER), CAST(NULLIF(3, 3) AS INTEGER), \
+                 NULLIF(CAST(1 AS INTEGER), 1), MAX(CAST(NULL AS INTEGER))"
+            ),
+            [const { Value::Null }; 4]
+        );
+        // A CAST does not hide an aggregate that is inside an aggregate.
+        for sql in [
+            "SELECT MAX(CAST(COUNT(*) AS INTEGER))",
+            "SELECT CAST(MAX(COUNT(*)) AS INTEGER)",
+        ] {
+            assert_eq!(
+                select(sql).unwrap_err().to_string(),
+                "misuse of aggregate function COUNT"
+            );
+        }
+        // Each CAST is one level of nesting.
+        let casts = |depth: usize| {
+            let (open, close) = ("CAST(".repeat(depth), " AS INTEGER)".repeat(depth));
+            format!("SELECT {open}7{close}")
+        };
+        assert_eq!(run(&casts(MAX_DEPTH - 1)), ints(&[7]));
+        assert!(select(&casts(MAX_DEPTH)).is_err());
+    }
+
+    #[test]
+    fn cast_errors() {
+        for sql in [
+            // SQLite gives a value for each one up to `CAST(1 AS)`.
+            "SELECT CAST(1 AS INT)",
+            "SELECT CAST(1 AS SIGNED)",
+            "SELECT CAST(1 AS BIGINT)",
+            "SELECT CAST(1 AS REAL)",
+            "SELECT CAST(1 AS TEXT)",
+            "SELECT CAST(1 AS NUMERIC)",
+            "SELECT CAST(1 AS BLOB)",
+            "SELECT CAST(NULL AS TEXT)",
+            "SELECT CAST(1 AS INTEGERS)",
+            "SELECT CAST(1 AS INTEGER(10))",
+            "SELECT CAST(1 AS INTEGER INTEGER)",
+            "SELECT CAST(1 AS UNSIGNED INTEGER)",
+            "SELECT CAST(1 AS \"INTEGER\")",
+            // The overflow is a real number there, and the cast gives 9223372036854775807.
+            "SELECT CAST(9223372036854775807 + 1 AS INTEGER)",
+            "SELECT CAST(1 AS)",
+            "SELECT CAST(1 INTEGER)",
+            "SELECT CAST(1)",
+            "SELECT CAST()",
+            "SELECT CAST(AS INTEGER)",
+            "SELECT CAST(1 AS INTEGER 2)",
+            "SELECT CAST(1 AS INTEGER, 2)",
+            "SELECT CAST(1, 2 AS INTEGER)",
+            "SELECT CAST(1 AS INTEGER",
+            "SELECT CAST(1 AS x AS INTEGER)",
+            "SELECT CAST(1 x AS INTEGER)",
+            "SELECT CAST(1 AS INTEGER AS INTEGER)",
+            "SELECT CAST(1 AS INTEGER) 2",
+            "SELECT CAST(1 AS INTEGER))",
+            "SELECT CAST 1 AS INTEGER",
+            "SELECT CAST",
+            "SELECT CAST(ALL 1 AS INTEGER)",
+            "SELECT CAST(DISTINCT 1 AS INTEGER)",
+            "SELECT CAST(* AS INTEGER)",
+            "SELECT COUNT(CAST(* AS INTEGER))",
+            "SELECT CAST(1 AS INTEGER) OVER ()",
+            "SELECT CAST(abs(1) AS INTEGER)",
+            "SELECT 1 CAST(2 AS INTEGER)",
+            // SQLite gives 1.
+            "SELECT 1 AS CAST",
+        ] {
+            assert!(select(sql).is_err(), "no error: {sql}");
+        }
+        assert_eq!(
+            select("SELECT CAST(1 AS text)").unwrap_err().to_string(),
+            "CAST to text is not supported"
+        );
+        assert_eq!(
+            select("SELECT CAST(1 AS)").unwrap_err().to_string(),
+            "unsupported syntax at RightParen"
+        );
+    }
+
     #[test]
     fn select_list_keywords_and_aliases() {
         assert_eq!(run("select all 1 AS a, 2 b ,3"), ints(&[1, 2, 3]));
@@ -744,7 +916,6 @@ mod tests {
             "SELECT a",
             "SELECT abs(1)",
             "SELECT CASE WHEN 1 THEN 2 END",
-            "SELECT CAST(1 AS INTEGER)",
             "SELECT 1 = 1",
             "SELECT 1 < 2",
             "SELECT 1 AND 1",
