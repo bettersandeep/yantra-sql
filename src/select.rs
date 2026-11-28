@@ -41,8 +41,9 @@ const KEYWORDS: [&str; 147] = [
 /// Deeper input is an error and not a stack overflow.
 /// This is the engine's own limit on the recursion of the parser. It is not a limit of SQLite,
 /// and it is not the height that `MAX_EXPR_HEIGHT` bounds.
-/// SQLite accepts 1001 pairs of parentheses and 999 unary minus signs, and this limit stops
-/// both at 100. Raise the limit if real queries need it.
+/// SQLite 3.46.1 gives 7 for `SELECT (((7)))` with 1001 pairs of parentheses and with 1002
+/// pairs, so SQLite has no limit of 1000 there. It also accepts 999 unary minus signs.
+/// This limit stops both at 100. Raise the limit if real queries need it.
 const MAX_DEPTH: usize = 100;
 
 /// The highest number of result columns of a SELECT.
@@ -79,6 +80,10 @@ const MAX_EXPR_HEIGHT: usize = 1000;
 ///   arithmetic (`H + 1` is an error), for the comparisons (`H = 1`, `1 = H`, `H < 1` and
 ///   `H <> 1` are errors, `G = 1` works) and for `OR` (`H OR 1`, `H OR 0` and `1 OR H` are
 ///   errors, `G OR 1` works).
+///   Each comparison operator is measured on the two sides. With `H` as 999 `~` before `1` and
+///   `G` as 998 `~` before `1`: `H op 1` and `1 op H` are errors, and `G op 1` and `1 op G`
+///   work, for each `op` of `<=`, `>`, `>=`, `==` and `!=`. `1 < H` and `1 <> H` are errors,
+///   `1 < G` and `1 <> G` work.
 /// - `IS NULL` and `IS NOT NULL` have the height of the operand plus 1: `H IS NULL` and
 ///   `H IS NOT NULL` are errors, the same with `G` works.
 /// - `AND` has the height of its highest operand plus 1: `H AND 1`, `1 AND H` and `H AND NULL`
@@ -2012,6 +2017,30 @@ mod tests {
             format!("SELECT 1, {h} + 1"),
         ] {
             assert_eq!(select(&sql).unwrap_err().to_string(), TOO_HIGH, "{sql}");
+        }
+    }
+
+    // Each comparison operator on the two sides. The comment of `Node` has the answers of
+    // SQLite 3.46.1: a height of 1000 on one side is an error, and a height of 999 works.
+    #[test]
+    fn height_of_each_comparison_operator() {
+        let (g, h) = (sum_of(999), sum_of(1000));
+        // The values of `999 op 1` and of `1 op 999`.
+        for (op, left, right) in [
+            ("=", 0, 0),
+            ("==", 0, 0),
+            ("<>", 1, 1),
+            ("!=", 1, 1),
+            ("<", 0, 1),
+            ("<=", 0, 1),
+            (">", 1, 0),
+            (">=", 1, 0),
+        ] {
+            assert_eq!(run(&format!("SELECT {g} {op} 1")), ints(&[left]), "{op}");
+            assert_eq!(run(&format!("SELECT 1 {op} {g}")), ints(&[right]), "{op}");
+            for sql in [format!("SELECT {h} {op} 1"), format!("SELECT 1 {op} {h}")] {
+                assert_eq!(select(&sql).unwrap_err().to_string(), TOO_HIGH, "{op}");
+            }
         }
     }
 }
