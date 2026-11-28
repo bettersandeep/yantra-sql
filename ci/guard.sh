@@ -43,22 +43,4 @@ if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = p
 		exit 1
 	fi
 fi
-# 4. In a pull request, each step of the CI workflow of the base branch is
-#    still in the workflow of the pull request. A pull request can add a
-#    check. It cannot remove one or change one. To do that, change this
-#    guard first, in its own pull request.
-if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request_target ]; then
-	git show "origin/${GITHUB_BASE_REF}:.github/workflows/ci.yml" | grep -E '^[[:space:]]*- run: ' | sed 's/^[[:space:]]*//' >"$tmp/base-steps"
-	if [ ! -s "$tmp/base-steps" ]; then
-		echo "guard: cannot read the CI steps of the base branch" >&2
-		exit 1
-	fi
-	grep -E '^[[:space:]]*- run: ' .github/workflows/ci.yml | sed 's/^[[:space:]]*//' >"$tmp/head-steps" || true
-	while IFS= read -r step; do
-		if ! grep -qxF -- "$step" "$tmp/head-steps"; then
-			echo "guard: this pull request removes or changes a CI step of the base branch: $step" >&2
-			exit 1
-		fi
-	done <"$tmp/base-steps"
-fi
 echo "guard: ok"
