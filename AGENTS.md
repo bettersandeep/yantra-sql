@@ -75,6 +75,13 @@ docker run --rm --network none -v "$PWD":/src:ro rust:1.96.1 sh -c 'cp -r /src /
 - Reason: pull request #3. The harness was written from a description of the format that came from memory. Qodo found three places where it differed from the format document, and all three were real.
 - Check: none that is automatic. The review is the check.
 
+### 6. A check does not come from the change that it checks
+
+- Scope: `ci/guard.sh`, `.github/workflows/ci.yml`, `yantra/runner.py`, and each new check.
+- Rule: a check runs from the base branch, or from a place outside the tree of the change. The change cannot edit, replace or redirect it. When you add a check, say in a comment where its code comes from at run time.
+- Reason: four findings of Qodo in three pull requests are this one mistake. In #7 a pull request could change a test file and its checksum together. In #17 the runner ran the guard from the agent's copy, and the agent could reach the git config that the runner's push reads. In #22 a relative path let the agent put its own script where the runner's command was expected.
+- Check: the runner takes `ci/guard.sh` from `origin/main`, and the one command of the agent is a file outside its clone. On a pull request, CI runs the guard of the base branch and not the guard of the pull request. Not covered: the workflow file comes from the pull request, so a pull request can remove that step. A person reads each change to `.github/`.
+
 ## Pull requests
 
 - One ticket per pull request. The description starts with `Closes #<issue>` and lists the acceptance criteria of the ticket.
