@@ -1,0 +1,18 @@
+[package]
+name = "lekha-wasm"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "The lekha engine as a WebAssembly module for the playground page."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+lekha = { path = "../.." }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
