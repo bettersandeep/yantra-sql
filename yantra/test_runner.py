@@ -551,6 +551,10 @@ class TextTest(unittest.TestCase):
 FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$YT_TEST_LOG"
 if [ "$1" = image ]; then exit "${YT_TEST_NO_IMAGE:-0}"; fi
+# YT_TEST_FAIL: a part of the command line. The call that has it fails with YT_TEST_CODE.
+if [ -n "${YT_TEST_FAIL:-}" ]; then
+	case "$*" in *"$YT_TEST_FAIL"*) exit "${YT_TEST_CODE:-1}" ;; esac
+fi
 """
 FAKE_GIT = """#!/bin/sh
 echo "git[$GIT_CONFIG_GLOBAL $GIT_CONFIG_SYSTEM] $*" >> "$YT_TEST_LOG"
@@ -613,7 +617,7 @@ class YtTest(unittest.TestCase):
             code, _, calls = self.yt("status", PATH=path)
             self.assertEqual((code, calls), (0, [git + "status --porcelain"]))
             code, _, calls = self.yt("check", PATH=path)
-            self.assertEqual((code, len(calls), calls[0].split()[0]), (0, 1, "docker"))
+            self.assertEqual((code, len(calls), calls[0].split()[0]), (0, len(runner.CHECKS), "docker"))
             code, _, calls = self.yt("sqlite", "q.sql", PATH=path)  # sub/q.sql, from the folder sub
             self.assertEqual((code, calls[-1].split()[-1]), (0, "/src/sub/q.sql"))
             self.assertNotIn("evil", calls)
@@ -625,10 +629,41 @@ class YtTest(unittest.TestCase):
 
     def test_check_and_failures(self):
         box = "docker run --rm --network none --pull never -v %s:/src:ro " % self.clone
-        code, _, calls = self.yt("check")
-        self.assertEqual((code, calls), (0, [box + "yantra-rust:1.96.1 sh -c " + runner.BUILD_SCRIPT]))
+        code, err, calls = self.yt("check")
+        copy = "cp -r /src /tmp/w && cd /tmp/w && "
+        crate = (
+            "cargo fmt --check --manifest-path %s && "
+            "cargo clippy --locked --offline --all-targets --manifest-path %s -- -D warnings && "
+            "cargo test --locked --offline --manifest-path %s"
+        )
+        wanted = [
+            box + "yantra-rust:1.96.1 sh -c " + runner.BUILD_SCRIPT,
+            box + "yantra-rust:1.96.1 sh -c " + copy + crate % (("server/Cargo.toml",) * 3),
+            box + "yantra-rust:1.96.1 sh -c " + copy + crate % (("site/wasm/Cargo.toml",) * 3),
+            box + "python:3.13-slim sh -c " + copy + "python3 -m unittest discover -s site -p 'test_*.py'",
+        ]
+        self.assertEqual((code, err, calls), (0, "", wanted))
         code, _, calls = self.yt("failures", "20")
         self.assertEqual((code, calls), (0, [box + "-e SLT_FAILURES=20 yantra-rust:1.96.1 sh -c " + runner.FAILURES_SCRIPT]))
+
+    def test_check_says_which_crate_failed(self):
+        """The first check that fails stops `yt check`, and stderr has its name."""
+        cases = (
+            ("cargo fmt --check &&", "build of the engine crate", 1),
+            ("server/Cargo.toml", "build of the crate server/", 2),
+            ("site/wasm/Cargo.toml", "build of the crate site/wasm/", 3),
+            ("unittest discover -s site", "tests of the site (Python tests of site/)", 4),
+        )
+        for part, name, ran in cases:
+            code, err, calls = self.yt("check", YT_TEST_FAIL=part, YT_TEST_CODE="101")
+            self.assertEqual((code, len(calls)), (101, ran), name)
+            self.assertEqual(err, "yt check: FAILED: %s (exit code 101). The checks after it did not run.\n" % name)
+
+    def test_check_says_when_docker_could_not_start_a_check(self):
+        code, err, calls = self.yt("check", YT_TEST_FAIL="python:3.13-slim", YT_TEST_CODE="125")
+        self.assertEqual((code, len(calls)), (125, 4))
+        self.assertIn("Docker could not start the check `tests of the site (Python tests of site/)`", err)
+        self.assertNotIn("FAILED", err)
 
     def test_sqlite_takes_a_file_inside_the_clone(self):
         for name in ("sub/q.sql", os.path.join(self.clone, "sub", "q.sql"), "sub/../sub/q.sql"):
@@ -839,6 +874,7 @@ class StartTest(unittest.TestCase):
         self.assertEqual(runner.preconditions(), [])
         self.assertIn("docker image inspect " + runner.RUST_IMAGE, self.calls())
         self.assertIn("docker image inspect " + runner.GUARD_IMAGE, self.calls())
+        self.assertIn("docker image inspect " + runner.PYTHON_IMAGE, self.calls())  # the tests of the site need it
 
     def test_a_state_path_that_the_rule_cannot_hold_stops_the_run(self):
         self.addCleanup(setattr, runner, "STATE", runner.STATE)
@@ -859,7 +895,7 @@ class StartTest(unittest.TestCase):
             self.assertEqual(runner.preconditions(), [])
 
     def test_a_missing_image_stops_the_run_before_a_write(self):
-        for image in (runner.RUST_IMAGE, runner.GUARD_IMAGE):
+        for image in (runner.RUST_IMAGE, runner.GUARD_IMAGE, runner.PYTHON_IMAGE):
             os.environ["YT_TEST_MISSING"] = image
             if os.path.exists(self.log):
                 os.remove(self.log)
@@ -1612,6 +1648,96 @@ class AuditTest(unittest.TestCase):
         self.assertEqual((code, result["unreadable"][0]["pr"]), (2, 9))
 
 
+class ChecksTest(unittest.TestCase):
+    """Run.checks, the runner's own check before the push. git and docker are stand-ins."""
+
+    ENGINE = "build of the engine crate"
+    SERVER = "build of the crate server/"
+    WASM = "build of the crate site/wasm/"
+    SITE = "tests of the site (Python tests of site/)"
+
+    def checks(self, fail=None, code=101):
+        """fail: a part of the docker command line that fails. Return (the result of Run.checks, the docker calls, run)."""
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        self.addCleanup(setattr, runner, "STATE", runner.STATE)
+        runner.STATE = state.name
+        run = runner.Run(issue())
+        os.makedirs(os.path.join(run.clone, "tests", "slt"))
+        with open(os.path.join(run.clone, "tests", "slt", "baseline.txt"), "w", encoding="utf-8") as f:
+            f.write("a.test 5\n")
+        run.old = 5
+        calls = []
+
+        def sh(cmd, cwd=None, timeout=300, env=None):
+            calls.append((cmd, timeout))
+            line = " ".join(cmd)
+            if fail and fail in line:
+                return code, "the output\n", "the error\n"
+            return 0, "slt: a.test 5/7\n" if "cargo test --locked --offline -- --nocapture" in line else "ok\n", ""
+
+        run.sh = sh
+        run.git = lambda *args: (0, "src/select.rs\n", "")
+        return run.checks(["src/"]), calls, run
+
+    def test_each_set_runs_in_a_container_with_no_network(self):
+        failed, calls, run = self.checks()
+        self.assertIsNone(failed)
+        self.assertEqual((run.new, run.applicable), (5, 7))
+        box = ["docker", "run", "--rm", "--network", "none", "--pull", "never", "-v", run.clone + ":/src:ro"]
+        copy = "cp -r /src /tmp/w && cd /tmp/w && "
+        crate = (
+            "cargo fmt --check --manifest-path %s && "
+            "cargo clippy --locked --offline --all-targets --manifest-path %s -- -D warnings && "
+            "cargo test --locked --offline --manifest-path %s"
+        )
+        wanted = [
+            box + ["yantra-rust:1.96.1", "sh", "-c", runner.BUILD_SCRIPT],
+            box + ["yantra-rust:1.96.1", "sh", "-c", copy + crate % (("server/Cargo.toml",) * 3)],
+            box + ["yantra-rust:1.96.1", "sh", "-c", copy + crate % (("site/wasm/Cargo.toml",) * 3)],
+            box + ["python:3.13-slim", "sh", "-c", copy + "python3 -m unittest discover -s site -p 'test_*.py'"],
+        ]
+        self.assertEqual([cmd for cmd, _ in calls[1:]], wanted)  # calls[0] is the guard
+        self.assertEqual(calls[0][0][-4], runner.GUARD_IMAGE)
+        self.assertEqual({timeout for _, timeout in calls}, {runner.CHECK_LIMIT_S})
+
+    def test_a_failure_has_the_name_of_its_crate(self):
+        cases = (
+            ("cargo fmt --check &&", self.ENGINE, 2),
+            ("server/Cargo.toml", self.SERVER, 3),
+            ("site/wasm/Cargo.toml", self.WASM, 4),
+            ("unittest discover -s site", self.SITE, 5),
+        )
+        for part, name, ran in cases:
+            failed, calls, run = self.checks(fail=part)
+            self.assertEqual(len(calls), ran, name)  # the checks after the failed one do not run
+            self.assertEqual(failed[0], name)
+            self.assertEqual(
+                failed[1], "The check `%s` failed, with exit code 101. Its output:\n\nthe output\nthe error\n" % name
+            )
+            self.assertIsNone(run.new)
+            # The text that starts the fix round of the agent has the name too.
+            self.assertIn("The check `%s` failed." % name, runner.check_text(failed[0], "/run/input/check-1.txt"))
+
+    def test_the_names_say_what_failed(self):
+        self.assertEqual([name for name, _, _ in runner.CHECKS], [self.ENGINE, self.SERVER, self.WASM, self.SITE])
+
+    def test_the_score_comes_from_the_engine_crate_only(self):
+        """With no check of the engine crate there is no score, and that is a failed check."""
+        failed, calls, run = self.checks()
+        self.assertEqual((failed, run.new), (None, 5))
+        self.addCleanup(setattr, runner, "CHECKS", runner.CHECKS)
+        runner.CHECKS = runner.CHECKS[1:]  # no check of the engine crate: there is no score
+        failed, calls, run = self.checks()
+        self.assertEqual(failed, ("score", "the test output has no `slt:` line"))
+
+    def test_docker_that_cannot_start_a_check_needs_a_human(self):
+        for part, name in (("server/Cargo.toml", self.SERVER), ("python:3.13-slim", self.SITE)):
+            with self.assertRaises(runner.NeedsHuman) as stop:
+                self.checks(fail=part, code=125)
+            self.assertIn("Docker could not start the check `%s`: the error" % name, str(stop.exception))
+
+
 class FlowTest(unittest.TestCase):
     """The loop of Run.work, with each outside step replaced. No process starts."""
 
@@ -1772,7 +1898,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual((state, self.comments), ("needs", ["/agentic_review"]))
 
     def test_failed_checks_use_the_fix_attempts(self):
-        failed = ("build", "error[E0308]: mismatched types")
+        failed = ("build of the crate server/", "error[E0308]: mismatched types")
         state, note, run = self.flow([self.CLEAN], checks=[failed])
         self.assertEqual((state, run.starts, self.pushes), ("ready", 2, 1))
         output = os.path.join(run.dir, "input", "check-1.txt")

@@ -49,7 +49,10 @@ The paths of this run and the ticket are below this brief.
 ## The command `yt`
 
 - `yt check`: the full check.
-  It runs `cargo fmt --check`, `cargo clippy` with warnings as errors, and `cargo test`, in a container with no network.
+  It runs `cargo fmt --check`, `cargo clippy` with warnings as errors, and `cargo test` for three crates: the engine, `server/` and `site/wasm/`.
+  Then it runs the Python tests of `site/`.
+  Each of the four runs in a container with no network.
+  The first one that fails stops the check, and the last line says which one failed.
   The container works on a copy, so it changes no file.
   Apply a format change with an edit of the file.
 - `yt failures <n>`: the first `<n>` failing test records of the sqllogictest files, with the SQL, the expected result and the result.

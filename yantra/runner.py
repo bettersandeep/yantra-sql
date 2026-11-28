@@ -44,7 +44,7 @@ TOKEN_NAMES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERP
 LOCAL_REVIEW_LIMIT_S = 10 * 60
 RUST_IMAGE = "yantra-rust:1.96.1"
 GUARD_IMAGE = "golang:1.23"
-PYTHON_IMAGE = "python:3.13-slim"  # real SQLite for `yt sqlite`
+PYTHON_IMAGE = "python:3.13-slim"  # the Python tests of site/, and real SQLite for `yt sqlite`
 FINAL_WRITE_TRIES = 3
 RETRY_WAIT_S = 5
 CHECK_LIMIT_S = 30 * 60  # one Docker check
@@ -80,6 +80,32 @@ BUILD_SCRIPT = (
     "cp -r /src /tmp/w && cd /tmp/w && cargo fmt --check && "
     "cargo clippy --locked --offline --all-targets -- -D warnings && "
     "cargo test --locked --offline -- --nocapture"
+)
+COPY = "cp -r /src /tmp/w && cd /tmp/w && "
+
+
+def crate_script(manifest):
+    """Format, clippy and the tests of one more crate of the repo, as CI runs them, with no network."""
+    path = " --manifest-path " + manifest
+    return (
+        COPY + "cargo fmt --check" + path + " && "
+        "cargo clippy --locked --offline --all-targets" + path + " -- -D warnings && "
+        "cargo test --locked --offline" + path
+    )
+
+
+SITE_SCRIPT = COPY + "python3 -m unittest discover -s site -p 'test_*.py'"
+ENGINE_CHECK = "build of the engine crate"  # the crate at the root. Its output has the `slt:` lines of the score.
+# The build checks, in their order: (name, image, script). The name says what failed.
+# `yt check` and the runner's own check both run this list, each entry in a container of its own.
+# Where the code comes from at run time (rule 6 of AGENTS.md): from this file in the checkout of the
+# runner, and from `bin/yt` in the run directory. Neither is in the clone, so a candidate cannot change
+# the commands. The commands execute the code and the tests of the candidate by design.
+CHECKS = (
+    (ENGINE_CHECK, RUST_IMAGE, BUILD_SCRIPT),
+    ("build of the crate server/", RUST_IMAGE, crate_script("server/Cargo.toml")),
+    ("build of the crate site/wasm/", RUST_IMAGE, crate_script("site/wasm/Cargo.toml")),
+    ("tests of the site (Python tests of site/)", PYTHON_IMAGE, SITE_SCRIPT),
 )
 FAILURES_SCRIPT = "cp -r /src /tmp/w && cd /tmp/w && cargo test --locked --offline --test slt -- --nocapture"
 # `yt sqlite`: each line of the file is one statement for one in-memory database.
@@ -118,11 +144,28 @@ box() {
 repo() {
 	GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c core.hooksPath=/dev/null -C "$clone" "$@"
 }
+# One build check: its name, then the image and the command. The first check that fails stops `yt check`.
+check() {
+	name=$1
+	shift
+	echo "yt check: $name"
+	code=0
+	box "$@" || code=$?
+	if [ "$code" -eq 125 ]; then
+		echo "yt check: Docker could not start the check \\`$name\\`. If its image is not on this machine, say so in the report." >&2
+		exit 125
+	fi
+	if [ "$code" -ne 0 ]; then
+		echo "yt check: FAILED: $name (exit code $code). The checks after it did not run." >&2
+		exit "$code"
+	fi
+}
 
 # The command and the number of arguments must both be correct.
 case "${1:-} $#" in
 "check 1")
-	box @RUST@ sh -c @BUILD@
+@CHECKS@
+	echo "yt check: each check passed"
 	;;
 "failures 2")
 	case "$2" in
@@ -575,11 +618,11 @@ def yt_script(clone, path=None):
         "@PATH@": ":".join(part for part in path.split(":") if part.startswith("/")),
         "@RUST@": RUST_IMAGE,
         "@PYTHON@": PYTHON_IMAGE,
-        "@BUILD@": BUILD_SCRIPT,
         "@FAILURES@": FAILURES_SCRIPT,
         "@SQLITE@": SQLITE_PY,
     }
-    text = YT_TEMPLATE
+    lines = ["\tcheck %s %s sh -c %s" % tuple(shlex.quote(part) for part in check) for check in CHECKS]
+    text = YT_TEMPLATE.replace("@CHECKS@", "\n".join(lines))
     for word, value in words.items():
         text = text.replace(word, shlex.quote(value))
     return text
@@ -783,7 +826,7 @@ def preconditions():
             problems.append("`%s` failed" % " ".join(cmd))
     if not problems:
         # The checks use --pull never. A missing image must stop the run before a write to GitHub.
-        for image in (RUST_IMAGE, GUARD_IMAGE):
+        for image in (RUST_IMAGE, GUARD_IMAGE, PYTHON_IMAGE):
             if sh(["docker", "image", "inspect", image])[0] != 0:
                 problems.append("the Docker image `%s` is not on this machine. See \"Images\" in yantra/README.md" % image)
     return problems
@@ -1272,12 +1315,17 @@ class Run:
         self.docker_ran("guard", code, err)
         if code != 0:
             return "guard", out + err
-        code, out, err = self.sh(mount + [RUST_IMAGE, "sh", "-c", BUILD_SCRIPT], timeout=CHECK_LIMIT_S)
-        self.docker_ran("build", code, err)
-        if code != 0:
-            return "build", out + err
+        score_out = ""
+        for name, image, script in CHECKS:
+            code, out, err = self.sh(mount + [image, "sh", "-c", script], timeout=CHECK_LIMIT_S)
+            self.docker_ran(name, code, err)
+            if code != 0:
+                # The first line of the file for the agent says what failed.
+                return name, "The check `%s` failed, with exit code %d. Its output:\n\n%s" % (name, code, out + err)
+            if name == ENGINE_CHECK:
+                score_out = out
         try:
-            new, applicable = parse_score(out)
+            new, applicable = parse_score(score_out)
             with open(os.path.join(self.clone, "tests", "slt", "baseline.txt"), encoding="utf-8") as f:
                 baseline = parse_baseline(f.read())
         except (OSError, ValueError) as error:
@@ -1293,7 +1341,7 @@ class Run:
     def docker_ran(self, name, code, err):
         """Exit code 125 is from Docker itself: a missing image or mount. The agent cannot fix that."""
         if code == 125:
-            raise NeedsHuman("Docker could not start the %s check: %s" % (name, err.strip()[-300:]))
+            raise NeedsHuman("Docker could not start the check `%s`: %s" % (name, err.strip()[-300:]))
 
     def push(self, criteria):
         """Push the branch, then open the pull request or set its new body. Return the head sha."""
