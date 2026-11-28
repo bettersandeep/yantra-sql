@@ -1,0 +1,71 @@
+{
+ "note": "Two findings of Qodo on pull request 44 of bettersandeep/lekha, cut from the full record in day08/qodo-record-pr44.json. Nothing in them was edited.",
+ "findings": [
+  {
+   "title": "Local review adds an extra fix round",
+   "category": "Reliability",
+   "action_level": "remediation_recommended",
+   "attribution_status": "implemented",
+   "git_sha": "77da2ed6f2a342732d5e70d93cd0ca2863e4a97d",
+   "id": "346bbbf5-b0ca-4518-906e-cf8491f46e34",
+   "description": "`LOCAL_FIX_ATTEMPTS = 1` gives the local Qodo review its own agent round, and `local_attempts` is checked separately from `attempts` in `Run.work`. The pull request review can still spend its 2 rounds, so one run can start the agent 3 times for review findings, which the checklist forbids for blocking review findings. A local threshold finding that comes back after the local round is also committed rather than sent to the shared budget.",
+   "evidence": {
+    "citations": [
+     {
+      "source_type": "rules",
+      "source": "https://app.qodo.ai/rules/5040936?state=active"
+     },
+     {
+      "source_type": "pr_branch_file",
+      "source": "yantra/runner.py[38-40]"
+     },
+     {
+      "source_type": "pr_branch_file",
+      "source": "yantra/runner.py[907-924]"
+     }
+    ]
+   },
+   "location": {
+    "file_path": "yantra/runner.py",
+    "start_line": 918,
+    "end_line": 919,
+    "side": "right"
+   }
+  },
+  {
+   "title": "Local review can drive two fix rounds",
+   "category": "Correctness",
+   "action_level": "action_required",
+   "attribution_status": "implemented",
+   "git_sha": "130c8519627daf9cf84d9c0dc27237a540fa83f9",
+   "id": "0a25aa81-d330-4346-b1c0-df8bc48ba012",
+   "description": "The local-review branch in `Run.work` takes its fix round from the same `attempts` counter as the failed-check and pull-request-review rounds, which starts at `FIX_ATTEMPTS = 2`. Each blocking local review does `attempts -= 1` and then `continue`, so two consecutive local reviews with findings can each start the agent, and only the local review spends the budget. The test `test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit` confirms this: three agent starts, two of them driven by local findings. The PR description and the ticket-derived rule allow one local fix round per run, separate from the two pull-request rounds, so the code allows more review-driven fix rounds than the limit.",
+   "evidence": {
+    "citations": [
+     {
+      "source_type": "ticket",
+      "source": "https://github.com/bettersandeep/lekha/issues/43"
+     },
+     {
+      "source_type": "pr_branch_file",
+      "source": "yantra/runner.py[968-998]"
+     },
+     {
+      "source_type": "pr_branch_file",
+      "source": "yantra/test_runner.py[1346-1351]"
+     },
+     {
+      "source_type": "pr_branch_file",
+      "source": "yantra/README.md[85-86]"
+     }
+    ]
+   },
+   "location": {
+    "file_path": "yantra/runner.py",
+    "start_line": 987,
+    "end_line": 987,
+    "side": "right"
+   }
+  }
+ ]
+}

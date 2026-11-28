@@ -1,0 +1,33 @@
+== runner.py of commit 130c851 (before the fix), with the test of main
+$ python3 -m unittest test_runner.LocalFlowTest.test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit
+F
+======================================================================
+FAIL: test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit (test_runner.LocalFlowTest.test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+    self.assertEqual((state, run.starts, self.steps), ("needs", 2, self.ROUND * 2))  # no commit, no push
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Tuples differ: ('needs', 3, ['agent', 'local review', 'agent', 'lo[33 chars]ew']) != ('needs', 2, ['agent', 'local review', 'agent', 'local review'])
+
+First differing element 1:
+3
+2
+
++ ('needs', 2, ['agent', 'local review', 'agent', 'local review'])
+- ('needs',
+-  3,
+-  ['agent', 'local review', 'agent', 'local review', 'agent', 'local review'])
+
+----------------------------------------------------------------------
+Ran 1 test in 0.010s
+
+FAILED (failures=1)
+
+== runner.py of main (after the fix), with the test of main
+$ python3 -m unittest test_runner.LocalFlowTest.test_an_open_local_finding_after_the_rounds_needs_a_human_with_no_commit
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.007s
+
+OK
+
