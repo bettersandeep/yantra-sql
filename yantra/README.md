@@ -18,7 +18,7 @@ The runner never merges.
   Python 3, standard library only.
 - `brief.md`: the standing brief that each coding agent gets, before the ticket.
 - `test_runner.py` and `testdata/`: the tests.
-  `testdata/` holds real Qodo review comments.
+  `testdata/` holds real review records of Qodo.
 - `com.yantra.tick.plist`, `install.sh`, `uninstall.sh`: the launchd user agent that starts the runner on a Mac.
 
 ## A ticket
@@ -45,7 +45,7 @@ It changes nothing.
 
 `python3 yantra/runner.py run <N>` does these steps for issue `<N>`.
 
-1. It checks that `gh` is logged in, that Docker runs, that the two Docker images of the checks are on the machine, and that `claude` is on the PATH.
+1. It checks that `gh` and `qodo` are logged in, that Docker runs, that the two Docker images of the checks are on the machine, and that `claude` is on the PATH.
    If not, it exits with code 2 and writes nothing to GitHub.
    For a tick, the issue keeps `agent-go`.
 2. It reads the issue.
@@ -72,9 +72,11 @@ It changes nothing.
 9. It pushes the branch and opens the pull request.
    The body has `Closes #<N>`, the criteria as a task list that is not ticked, the score, and the report of the agent as plain text.
 10. It waits for CI and for the Qodo review of the head commit.
+    It reads Qodo's review record with `qodo read pr-review-session findings`.
+    The review is in when the record has the status `completed` for the full SHA of the head commit.
     The time limit is 20 minutes.
-    If Qodo answers that something went wrong, the runner comments `/agentic_review` one time and waits again.
-11. If the review has findings, it saves the review to a file and starts the agent again.
+    If Qodo's newest comment says that something went wrong, the runner comments `/agentic_review` one time and waits again.
+11. If the record has an open finding at the threshold, it writes those findings to a file and starts the agent again.
     Then steps 6, 7, 9 and 10 run again.
 12. It stops: it comments on the issue, sets the end label, and then removes `agent-working`.
 
@@ -87,6 +89,52 @@ Each later one has `Ticket #<N>: fixes after checks or review, round <k>`.
 The runner fails closed.
 When a step cannot read or understand its input, the run stops as "needs a human" with the reason.
 "Could not check" is never "passed".
+
+## The review record
+
+The runner does not read the text of Qodo's review comment.
+That text changes its shape, and the record does not.
+The one exception is the comment that says "something went wrong", because then there is no record.
+
+Each finding in the record has a status and a level.
+
+- The status says open or closed.
+  Open: `pending`, `partial_implementation`, `not_implemented`, `focus_areas_edited`.
+  Closed: `implemented`, `full_implementation`, `dismissed`, `detected_after_merge`, `outdated`.
+- The level is the severity: `action_required`, `remediation_recommended` or `informational`.
+  It does not say open or closed.
+
+The threshold of the runner is an open finding with the level `action_required` or `remediation_recommended`.
+Such a finding goes back to the agent.
+The file for the agent has its title, description, category, level, location and evidence.
+An open `informational` finding does not block, and the comment on the issue lists it as flagged, not fixed.
+The comment also lists each `dismissed` finding, so that a person sees what was closed without a fix.
+
+These cases need a human, with the reason in the comment:
+
+- a status or a level that is not in the lists above, or a finding with no title, status or level;
+- no review session in the record when the time limit ends;
+- a session for an older commit when the time limit ends. The comment gives the commit that Qodo reviewed and the head commit;
+- `review_complete` is not true in the record, on the first review. Qodo sets that for a change that it judges trivial.
+
+`AGENTS.md` has the full gate under "Quality gate".
+
+## Audit
+
+`python3 yantra/runner.py audit [--limit N]` reads the record of the last N merged pull requests.
+The default for N is 30.
+It prints JSON with each finding that is open or has the status `detected_after_merge`.
+Qodo files `detected_after_merge` as closed, but it is a fault on the main branch that no pull request fixed.
+The command only reads.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | No such finding at the threshold. |
+| 1 | One or more such findings have the level `action_required` or `remediation_recommended`. |
+| 2 | A record could not be read. The JSON names the pull request. |
+
+A finding stays `detected_after_merge` in the record after a later pull request fixed it.
+So a person reads the list and decides.
 
 ## What the runner executes from the candidate
 
@@ -116,12 +164,12 @@ The runner makes these labels when they are missing.
 |---|---|---|---|
 | `agent-go` | issue | a person | Start the runner on this ticket. |
 | `agent-working` | issue | the runner | A run is in progress. |
-| `ready-for-human` | pull request | the runner | CI is green and the Qodo review of the head commit is clean. |
+| `ready-for-human` | pull request | the runner | CI is green, and the Qodo review of the head commit is complete with no open finding at the threshold. |
 | `needs-human` | issue, and pull request if there is one | the runner | The run stopped, and the comment on the issue gives the reason. |
 
 `ready-for-human` has one more case.
-Qodo does not review a change that it judges trivial.
-If that happens after the runner handled an earlier review of the same pull request, the pull request is ready, and the comment says so.
+Qodo does not review a change that it judges trivial, and then `review_complete` is not true in the record.
+If that happens after the runner handled an earlier review of the same pull request, and no finding at the threshold is open, the pull request is ready, and the comment says so.
 If it happens on the first review, the run needs a human.
 
 At the start, the runner adds `agent-working` first.
@@ -137,7 +185,7 @@ If that file cannot be written, its text goes to stderr, which is `tick.log` for
 
 The handoff does not need the run directory.
 The log never stops a run: when `run.log` cannot be written, the line goes to stderr.
-When the run directory is gone during the wait for the review, the wait goes on, because it needs only GitHub.
+When the run directory is gone during the wait for the review, the wait goes on, because it needs only GitHub and Qodo.
 An error in the runner after the label change ends as `needs-human`, with the error in the comment.
 
 Exit codes of `run` and `tick`:
@@ -226,7 +274,7 @@ With white space, a quote or a different special character in the real path, the
 - `tick.log`: the output of each tick from launchd.
 - `runs/<branch>-<UTC time>/run.log`: each command of one run, with its exit code and output, and UTC times.
 - `runs/<branch>-<UTC time>/agent-prompt-<k>.md` and `agent-report-<k>.md`: the prompt and the report of agent start `<k>`.
-- `runs/<branch>-<UTC time>/input/`: the files that the agent can read, which are the output of a failed check and a Qodo review.
+- `runs/<branch>-<UTC time>/input/`: the files that the agent can read, which are the output of a failed check and the open findings of a Qodo review.
 - `runs/<branch>-<UTC time>/bin/yt` and `guard.sh`: the command of the agent, and the guard of `origin/main`.
 - `runs/<branch>-<UTC time>/HANDOFF_FAILED`: only when a last write to GitHub failed.
 - `runs/<branch>-<UTC time>/repo`: the clone.
@@ -292,4 +340,4 @@ Limits that you must know:
 - The ticket goes into the prompt of an agent.
   Put `agent-go` only on a ticket that you read.
   The author of an issue can edit its body later.
-- The output of a failed check and the review text are files that the agent reads as data.
+- The output of a failed check and the findings of a review are files that the agent reads as data.
