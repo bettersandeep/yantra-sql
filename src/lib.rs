@@ -39,15 +39,23 @@ pub fn real_text(real: f64) -> Option<String> {
     if real == 0.0 {
         return Some("0.0".to_string());
     }
-    // The 18 digits of Rust are the exact number, rounded to the nearest 18 digits. The
-    // rounding to 15 digits below gives the same text for them as for the exact number, with
-    // one exception: the 18 digits are a half of the 15th digit (`500` at the end) and the
-    // exact number is below them. Only then the exact digits are needed.
-    let (mut digits, mut exponent) = decimal_digits(real.abs(), SHORT_PRECISION)?;
-    if digits.get(DIGITS..) == Some(&[5, 0, 0][..]) {
-        (digits, exponent) = decimal_digits(real.abs(), EXACT_PRECISION)?;
-    }
+    let (digits, exponent) = text_digits(real.abs())?;
     Some(rounded_text(real < 0.0, digits, exponent))
+}
+
+/// The digits of a positive finite number that `real_text` rounds to 15 digits, and the power
+/// of ten of the first digit. It gives 18 digits, or all 767 digits in the one case below.
+///
+/// The 18 digits of Rust are the exact number, rounded to the nearest 18 digits. The
+/// rounding to 15 digits gives the same text for them as for the exact number, with one
+/// exception: the 18 digits are a half of the 15th digit (`500` at the end) and the exact
+/// number is below them. Only then the exact digits are needed.
+fn text_digits(real: f64) -> Option<(Vec<u8>, i32)> {
+    let (digits, exponent) = decimal_digits(real, SHORT_PRECISION)?;
+    if digits.get(DIGITS..) == Some(&[5, 0, 0][..]) {
+        return decimal_digits(real, EXACT_PRECISION);
+    }
+    Some((digits, exponent))
 }
 
 /// The number of digits that SQLite prints for a real number.
@@ -292,6 +300,37 @@ mod tests {
     fn exact_text(real: f64) -> String {
         let (digits, exponent) = decimal_digits(real, EXACT_PRECISION).unwrap();
         rounded_text(false, digits, exponent)
+    }
+
+    // `real_text` formats 18 digits, and all 767 digits only for 18 digits with `500` at the
+    // end. This test fails when each number gets the 767 digits again, which is the slow path
+    // that a review finding of ticket #45 removed.
+    #[test]
+    fn real_text_formats_18_digits_when_they_are_enough() {
+        let short = SHORT_PRECISION + 1;
+        let exact = EXACT_PRECISION + 1;
+        assert_eq!((short, exact), (18, 767));
+        for (real, want) in [
+            (1.0, short),
+            (3.5, short),
+            (1.0 / 3.0, short),
+            (2.0 / 3.0, short),
+            (1.0e100, short),
+            (9223372036854775807.0, short),
+            (f64::MAX, short),
+            (f64::MIN_POSITIVE, short),
+            (f64::from_bits(1), short),
+            // The 16th digit is next to a half, and the 18 digits show that.
+            (1000000000000024.0, short),
+            (1000000000000026.0, short),
+            // The 18 digits are a half of the 15th digit.
+            (1000000000000005.0, exact),
+            (1000000000000025.0, exact),
+            (8000000000000075.0, exact),
+        ] {
+            let (digits, _) = text_digits(real).unwrap();
+            assert_eq!(digits.len(), want, "{real:e}");
+        }
     }
 
     // `real_text` reads 18 digits and not the exact number. Its text is the same.
