@@ -59,8 +59,10 @@ It changes nothing.
 5. It starts one agent in the clone with `claude -p`.
    The prompt is `yantra/brief.md` from the clone, the paths of the run, and the ticket.
    The time limit is 45 minutes.
-6. It commits the changes of the agent as one commit.
-   If the agent changed no file, the run needs a human.
+6. It runs the local review: `qodo review` on the changes of the agent that are not committed yet.
+   If the agent changed no file, the run needs a human, and there is no review.
+   The section "The local review" below has the rules.
+   Then it commits the changes of the agent as one commit.
    Then it removes each file that git ignores, so the checks see the commit and nothing more.
 7. It runs its own checks.
    Each changed path is inside the scope.
@@ -81,14 +83,39 @@ It changes nothing.
 12. It stops: it comments on the issue, sets the end label, and then removes `agent-working`.
 
 The runner has 2 fix attempts for one ticket.
-A failed check and a review with findings each use one.
-So one ticket gets 3 agent starts at most, and the pull request gets 3 commits at most.
+A failed check and a pull request review with findings each use one.
+The local review has a budget of its own: 1 agent round in one run.
+So one ticket gets 4 agent starts at most, and the pull request gets 3 commits at most.
 The commit of the first start has the message `Ticket #<N>: <title>`.
 Each later one has `Ticket #<N>: fixes after checks or review, round <k>`.
 
 The runner fails closed.
 When a step cannot read or understand its input, the run stops as "needs a human" with the reason.
 "Could not check" is never "passed".
+
+## The local review
+
+The pull request review comes late: by then the commit is public.
+So Qodo also reviews the work before the runner commits it.
+The runner runs `qodo review --json` in the clone, not the agent, and the tool limits of the agent do not change.
+
+- The review gets the ticket URL (`--ticket`) and a context file (`--context-file`) whose `recent_work` has the ticket title and the acceptance criteria.
+- The time limit is 10 minutes.
+  One review took 8 to 41 seconds in the tests.
+- The first review of a run has `--full`, so that no result of an older run of the ticket counts.
+- The findings have the same fields and the same words as the review record of a pull request, and the same rules apply.
+  The threshold is an open finding with the level `action_required` or `remediation_recommended`.
+- When the review has findings at the threshold, they go to a file in `input/`, and the agent gets one round to fix them or to say why a finding is wrong.
+  Then the review runs again.
+  This budget is 1 round in one run, and it is not part of the 2 fix attempts.
+- After that round the runner commits.
+  A finding that is still open does not stop the run.
+  That is also true when the agent changed nothing in its round.
+  The checks of the runner and the pull request review come after it.
+- The pull request body and the comment on the issue get the line `Local review before the commit: <n> findings, <m> fixed, <k> open`, and the titles of the open ones.
+  `<n>` counts the findings at the threshold in the local reviews of the run.
+- The run needs a human, and there is no commit, when the review cannot run: an error of `qodo`, the time limit, a result that is not complete, or a result that the runner cannot read.
+  It also needs a human when the clone has the file `.qodo/session-context.json`, because Qodo reads that file as context and the agent could write it.
 
 ## The review record
 
@@ -279,6 +306,7 @@ With white space, a quote or a different special character in the real path, the
 - `runs/<branch>-<UTC time>/run.log`: each command of one run, with its exit code and output, and UTC times.
 - `runs/<branch>-<UTC time>/agent-prompt-<k>.md` and `agent-report-<k>.md`: the prompt and the report of agent start `<k>`.
 - `runs/<branch>-<UTC time>/input/`: the files that the agent can read, which are the output of a failed check and the open findings of a Qodo review.
+- `runs/<branch>-<UTC time>/local-review-<k>.json` and `local-review-context.json`: the result of local review `<k>`, and its context file.
 - `runs/<branch>-<UTC time>/bin/yt` and `guard.sh`: the command of the agent, and the guard of `origin/main`.
 - `runs/<branch>-<UTC time>/HANDOFF_FAILED`: only when a last write to GitHub failed.
 - `runs/<branch>-<UTC time>/repo`: the clone.
