@@ -28,10 +28,14 @@ fi
 # 3. In a pull request, a change to the engine and a change to the things
 #    that measure it do not go together. Check 1 alone cannot stop a pull
 #    request that edits a test file and its checksum in one change.
+#    --no-renames: a rename shows its old path too, so a file that moves
+#    from the measure side into src/ is seen on both sides.
+#    yantra/ is on the measure side: the runner and the brief of the agents
+#    check the engine, so the engine does not change with them.
 if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-	changed=$(git -c core.quotePath=false diff --name-only "origin/${GITHUB_BASE_REF}...HEAD")
+	changed=$(git -c core.quotePath=false diff --no-renames --name-only "origin/${GITHUB_BASE_REF}...HEAD")
 	engine=$(printf '%s\n' "$changed" | grep -E '^(src/|Cargo\.toml$|Cargo\.lock$)' || true)
-	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/)' | grep -v '^tests/slt/baseline\.txt$' || true)
+	measure=$(printf '%s\n' "$changed" | grep -E '^(tests/slt\.rs$|tests/slt/|\.github/|ci/|yantra/)' | grep -v '^tests/slt/baseline\.txt$' || true)
 	if [ -n "$engine" ] && [ -n "$measure" ]; then
 		echo "guard: this pull request changes the engine and the things that measure it" >&2
 		printf 'engine:\n%s\nmeasure:\n%s\n' "$engine" "$measure" >&2
