@@ -1,0 +1,102 @@
+Behaviour check: integer compared with real, ticket #45 / PR #56 of bettersandeep/lekha
+Engine source: clone at HEAD 0fb4004 (src/ is the same as PR head 1738791: 'git diff --stat 1738791 HEAD -- src/' is empty).
+Both runs: Docker, --network none --pull never, repo mounted read-only and copied to /tmp in the container.
+
+=== 1. Engine (image yantra-rust:1.96.1) ===
+Command:
+  docker run --rm --network none --pull never -v "$PWD":/src:ro -v <work>:/work:ro yantra-rust:1.96.1 sh -c 'cp -r /src /tmp/lekha && cd /tmp/lekha && mkdir -p examples && cp /work/behaviour.rs examples/behaviour.rs && cargo run --locked --offline --quiet --example behaviour; cargo test --locked --offline comparison_with_a_real_operand -- --nocapture'
+Example file (examples/behaviour.rs, only in the container copy):
+  | // Behaviour check for ticket #45: integer vs real comparison. Not part of the repo.
+  | fn main() {
+  |     let queries = [
+  |         "SELECT 9223372036854775807 = CAST(9223372036854775807 AS REAL)",
+  |         "SELECT 9007199254740993 > CAST(9007199254740993 AS REAL)",
+  |         "SELECT CAST(1 AS REAL) = 1",
+  |         "SELECT CASE 9007199254740993 WHEN CAST(9007199254740993 AS REAL) THEN 1 ELSE 0 END",
+  |     ];
+  |     for sql in queries {
+  |         println!("{sql}\n  -> {:?}", lekha::Database::new().execute(sql));
+  |     }
+  | }
+Raw output:
+  SELECT 9223372036854775807 = CAST(9223372036854775807 AS REAL)
+    -> Ok([[Integer(0)]])
+  SELECT 9007199254740993 > CAST(9007199254740993 AS REAL)
+    -> Ok([[Integer(1)]])
+  SELECT CAST(1 AS REAL) = 1
+    -> Ok([[Integer(1)]])
+  SELECT CASE 9007199254740993 WHEN CAST(9007199254740993 AS REAL) THEN 1 ELSE 0 END
+    -> Ok([[Integer(0)]])
+  exit 0
+
+=== 2. SQLite (image python:3.13-slim) ===
+Command:
+  docker run --rm --network none --pull never -v <work>:/work:ro python:3.13-slim python3 -I /work/sqlite_check.py
+Script (sqlite_check.py):
+  | import sqlite3
+  | print("sqlite_version", sqlite3.sqlite_version)
+  | con = sqlite3.connect(":memory:")
+  | for sql in [
+  |     "SELECT 9223372036854775807 = CAST(9223372036854775807 AS REAL)",
+  |     "SELECT 9007199254740993 > CAST(9007199254740993 AS REAL)",
+  |     "SELECT CAST(1 AS REAL) = 1",
+  |     "SELECT CASE 9007199254740993 WHEN CAST(9007199254740993 AS REAL) THEN 1 ELSE 0 END",
+  | ]:
+  |     print(sql)
+  |     print("  ->", con.execute(sql).fetchall())
+Raw output:
+  sqlite_version 3.46.1
+  SELECT 9223372036854775807 = CAST(9223372036854775807 AS REAL)
+    -> [(0,)]
+  SELECT 9007199254740993 > CAST(9007199254740993 AS REAL)
+    -> [(1,)]
+  SELECT CAST(1 AS REAL) = 1
+    -> [(1,)]
+  SELECT CASE 9007199254740993 WHEN CAST(9007199254740993 AS REAL) THEN 1 ELSE 0 END
+    -> [(0,)]
+
+=== 3. Existing unit test for real comparison ===
+Command (same container run as 1): cargo test --locked --offline comparison_with_a_real_operand -- --nocapture
+Raw output:
+  ##### UNIT TEST
+     Compiling lekha v0.0.0 (/tmp/lekha)
+      Finished `test` profile [unoptimized + debuginfo] target(s) in 0.72s
+       Running unittests src/lib.rs (target/debug/deps/lekha-64235b9370dff239)
+  
+  running 1 test
+  test select::tests::comparison_with_a_real_operand ... ok
+  
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 0.00s
+  
+       Running unittests src/main.rs (target/debug/deps/lekha-7c6faf1f186577e0)
+  
+  running 0 tests
+  
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  
+       Running tests/slt.rs (target/debug/deps/slt-5c1aafed4a72709e)
+  
+  running 0 tests
+  
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+  
+  exit 0
+
+=== 4. Result table ===
+  query                                                                                | engine     | SQLite 3.46.1
+  SELECT 9223372036854775807 = CAST(9223372036854775807 AS REAL)                       | Integer(0) | 0
+  SELECT 9007199254740993 > CAST(9007199254740993 AS REAL)                             | Integer(1) | 1
+  SELECT CAST(1 AS REAL) = 1                                                           | Integer(1) | 1
+  SELECT CASE 9007199254740993 WHEN CAST(9007199254740993 AS REAL) THEN 1 ELSE 0 END   | Integer(0) | 0
+
+=== 5. Extra check made for the Requirements story (not asked): record map at base and head ===
+Command per side: SLT_MAP=/tmp/map.tsv cargo test --locked --offline --test slt -- --nocapture (trees from 'git archive 5c7adb1' and 'git archive 1738791')
+base 5c7adb1:
+  slt: random/expr/slt_good_0.test 9644/10012
+  test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+  exit 0
+head 1738791:
+  slt: random/expr/slt_good_0.test 9986/10012
+  test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+  exit 0
+Per record, base -> head: P->P 9644, F->P 342, F->F 26, P->F 0 (10012 records, same keys in both maps)
