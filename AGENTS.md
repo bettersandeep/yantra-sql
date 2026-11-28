@@ -82,8 +82,33 @@ docker run --rm --network none -v "$PWD":/src:ro rust:1.96.1 sh -c 'cp -r /src /
 - Reason: four findings of Qodo in three pull requests are this one mistake. In #7 a pull request could change a test file and its checksum together. In #17 the runner ran the guard from the agent's copy, and the agent could reach the git config that the runner's push reads. In #22 a relative path let the agent put its own script where the runner's command was expected.
 - Check: the runner takes `ci/guard.sh` from `origin/main`, and the one command of the agent is a file outside its clone. The workflow `guard.yml` runs on `pull_request_target`, so GitHub takes it from the base branch and a pull request cannot change or remove it. It runs the guard of the base branch on the files of the pull request. The guard step in `ci.yml` is a fast signal only, because that file comes from the pull request. Not covered: a red guard blocks a merge only when the person or the runner reads the checks. The runner needs each check to be green.
 
+## Quality gate
+
+The yantra runner enforces this gate on each ticket, in this order.
+A person merges.
+The runner never merges.
+
+1. Scope: each changed path is inside the `Scope:` line of the ticket.
+2. Guard: `ci/guard.sh` from the base branch passes.
+3. Build, lint and tests: `cargo fmt --check`, `cargo clippy` with warnings as errors, and `cargo test` pass.
+4. Score: the test prints the exact number that is in `tests/slt/baseline.txt`, and the number does not go down.
+5. Review: the Qodo review of the head commit is complete. The runner reads Qodo's review record, not the text of its comment.
+6. Findings: each open `action_required` and `remediation_recommended` finding is fixed. There are at most 2 fix rounds, for failed checks and findings together, and each round is a separate commit by the runner.
+7. Open `informational` findings and `dismissed` findings are listed for the person. The runner does not fix them.
+
+A finding is open when its status is `pending`, `partial_implementation`, `not_implemented` or `focus_areas_edited`.
+A status, a level or a record shape that the runner does not know is never read as clean.
+When Qodo skips a head commit that it judges trivial, the gate passes only after an earlier full review of the same pull request.
+
+The end states:
+
+- `ready-for-human`: each step passed, and CI is green on the head commit.
+- NOT DONE, `needs-human`: a finding at the threshold is still open after the rounds, a check could not run, the review does not cover the head, or a round changed nothing.
+
+`python3 yantra/runner.py audit` lists the findings that Qodo recorded after a merge. Qodo files them as closed, but no pull request fixed them.
+
 ## Pull requests
 
 - One ticket per pull request. The description starts with `Closes #<issue>` and lists the acceptance criteria of the ticket.
 - A fix for a review finding is a separate commit, with a test that fails on the commit before it.
-- A pull request merges when CI is green and Qodo's review of the head commit has no open findings.
+- A person merges a pull request when CI is green and the quality gate passed.
