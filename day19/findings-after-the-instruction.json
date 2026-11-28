@@ -1,0 +1,82 @@
+[
+ {
+  "pr": 54,
+  "level": "remediation_recommended",
+  "status": "pending",
+  "category": "Correctness",
+  "about_the_ticket": true,
+  "title": "This review change has no linked ticket"
+ },
+ {
+  "pr": 56,
+  "level": "remediation_recommended",
+  "status": "implemented",
+  "category": "Testability",
+  "about_the_ticket": false,
+  "title": "Review fix has no test that fails first"
+ },
+ {
+  "pr": 56,
+  "level": "informational",
+  "status": "pending",
+  "category": "Maintainability",
+  "about_the_ticket": true,
+  "title": "A new error case appears that no ticket asks for"
+ },
+ {
+  "pr": 56,
+  "level": "informational",
+  "status": "pending",
+  "category": "Maintainability",
+  "about_the_ticket": true,
+  "title": "Engine gains a public text function no ticket asks for"
+ },
+ {
+  "pr": 61,
+  "level": "remediation_recommended",
+  "status": "implemented",
+  "category": "Correctness",
+  "about_the_ticket": false,
+  "title": "Dismissed findings lose their titles"
+ },
+ {
+  "pr": 62,
+  "level": "remediation_recommended",
+  "status": "implemented",
+  "category": "Correctness",
+  "about_the_ticket": false,
+  "title": "A link can overwrite a visitor\u2019s Pi answer"
+ },
+ {
+  "pr": 62,
+  "level": "informational",
+  "status": "pending",
+  "category": "Maintainability",
+  "about_the_ticket": true,
+  "title": "An unrequested waiting line appears"
+ },
+ {
+  "pr": 62,
+  "level": "informational",
+  "status": "pending",
+  "category": "Maintainability",
+  "about_the_ticket": true,
+  "title": "Unrequested explanatory paragraph added"
+ },
+ {
+  "pr": 62,
+  "level": "informational",
+  "status": "pending",
+  "category": "Maintainability",
+  "about_the_ticket": true,
+  "title": "Pi requests set unrequested fetch options"
+ },
+ {
+  "pr": 62,
+  "level": "informational",
+  "status": "implemented",
+  "category": "Correctness",
+  "about_the_ticket": true,
+  "title": "Run and Ask the Pi cancel each other"
+ }
+]
